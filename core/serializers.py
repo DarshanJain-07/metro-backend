@@ -6,8 +6,8 @@ from .models import Branch, City, Party, State
 class StateSerializer(serializers.ModelSerializer):
     class Meta:
         model = State
-        fields = ('id', 'name', 'code', 'created_at')
-        read_only_fields = ('id', 'created_at')
+        fields = ('id', 'name', 'code', 'is_active', 'created_at', 'updated_at')
+        read_only_fields = ('id', 'created_at', 'updated_at')
 
 
 class CitySerializer(serializers.ModelSerializer):
@@ -16,8 +16,8 @@ class CitySerializer(serializers.ModelSerializer):
 
     class Meta:
         model = City
-        fields = ('id', 'name', 'state', 'state_name', 'state_code', 'is_active', 'created_at')
-        read_only_fields = ('id', 'state_name', 'state_code', 'created_at')
+        fields = ('id', 'name', 'state', 'state_name', 'state_code', 'is_active', 'created_at', 'updated_at')
+        read_only_fields = ('id', 'state_name', 'state_code', 'created_at', 'updated_at')
 
 
 class BranchSerializer(serializers.ModelSerializer):
@@ -26,8 +26,8 @@ class BranchSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Branch
-        fields = ('id', 'name', 'city', 'city_name', 'state_code', 'is_active', 'created_at')
-        read_only_fields = ('id', 'city_name', 'state_code', 'created_at')
+        fields = ('id', 'name', 'city', 'city_name', 'state_code', 'is_active', 'created_at', 'updated_at')
+        read_only_fields = ('id', 'city_name', 'state_code', 'created_at', 'updated_at')
 
 
 class PartySerializer(serializers.ModelSerializer):

@@ -1,12 +1,17 @@
-from django.http import Http404
-from rest_framework import serializers, viewsets
-from rest_framework.filters import SearchFilter
+from rest_framework import serializers, viewsets, status
+from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from django.http import Http404
 
 from .models import Branch, City, Party, State
 from .serializers import BranchSerializer, CitySerializer, PartySerializer, StateSerializer
+from .viewsets import (
+    OptimisticConcurrencyMixin, 
+    SoftDeleteMixin, 
+    IdempotentCreateMixin
+)
 
 
 def user_can_see_all_companies(user):
@@ -49,17 +54,23 @@ class ActionModelPermission(BasePermission):
         return request.user.has_perm(f'{model._meta.app_label}.{perm_action}_{model._meta.model_name}')
 
 
-class MasterDataViewSet(viewsets.ModelViewSet):
+class MasterDataViewSet(
+    IdempotentCreateMixin,
+    OptimisticConcurrencyMixin,
+    SoftDeleteMixin,
+    viewsets.ModelViewSet
+):
     permission_classes = [IsAuthenticated, ActionModelPermission]
-    filter_backends = [SearchFilter]
+    filter_backends = [SearchFilter, OrderingFilter]
+    ordering_fields = '__all__'
+    ordering = ['id']
 
     RESOURCE_CONFIG = {
         'states': {
             'model': State,
             'serializer_class': StateSerializer,
             'search_fields': ['name', 'code'],
-            'order_by': 'name',
-            'has_is_active': False,
+            'has_is_active': True,
             'company_scoped': False,
             'select_related': [],
         },
@@ -67,7 +78,6 @@ class MasterDataViewSet(viewsets.ModelViewSet):
             'model': City,
             'serializer_class': CitySerializer,
             'search_fields': ['name', 'state__name', 'state__code'],
-            'order_by': 'name',
             'has_is_active': True,
             'company_scoped': False,
             'select_related': ['state'],
@@ -76,7 +86,6 @@ class MasterDataViewSet(viewsets.ModelViewSet):
             'model': Branch,
             'serializer_class': BranchSerializer,
             'search_fields': ['name', 'city__name', 'city__state__code'],
-            'order_by': 'name',
             'has_is_active': True,
             'company_scoped': True,
             'select_related': ['city', 'city__state'],
@@ -85,7 +94,6 @@ class MasterDataViewSet(viewsets.ModelViewSet):
             'model': Party,
             'serializer_class': PartySerializer,
             'search_fields': ['name', 'phone', 'city__name', 'gst_number'],
-            'order_by': 'name',
             'has_is_active': True,
             'company_scoped': True,
             'select_related': ['city', 'city__state'],
@@ -108,18 +116,22 @@ class MasterDataViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         config = self._get_config()
         model = config['model']
-        qs = model.objects.all()
+        
+        # Use unscoped_objects if available to avoid double filtering with TenantManager
+        if hasattr(model, 'unscoped_objects'):
+            qs = model.unscoped_objects.all()
+        else:
+            qs = model.objects.all()
 
         if config['select_related']:
             qs = qs.select_related(*config['select_related'])
-
-        qs = qs.order_by(config['order_by'])
 
         if config['company_scoped']:
             qs = company_scoped_queryset(qs, self.request.user)
 
         if config['has_is_active']:
-            include_inactive = self.request.query_params.get('include_inactive') == 'true'
+            # For master data, we want to display everything by default
+            include_inactive = self.request.query_params.get('include_inactive', 'true') == 'true'
             if not include_inactive:
                 qs = qs.filter(is_active=True)
 
@@ -127,18 +139,27 @@ class MasterDataViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         config = self._get_config()
+        save_kwargs = self.get_idempotency_save_kwargs()
+        
         if config['company_scoped']:
-            if not getattr(self.request.user, 'company_id', None):
-                raise serializers.ValidationError("User must be assigned to a company before creating this resource.")
-            serializer.save(company=self.request.user.company)
+            company = getattr(self.request.user, 'company', None)
+            if not company:
+                raise serializers.ValidationError({
+                    "detail": "User must be assigned to a company before creating this resource."
+                })
+            serializer.save(company=company, **save_kwargs)
         else:
-            serializer.save()
+            serializer.save(**save_kwargs)
+
+    def perform_update(self, serializer):
+        # OptimisticConcurrencyMixin.perform_update handles check_precondition
+        super().perform_update(serializer)
 
     def perform_destroy(self, instance):
         config = self._get_config()
         if config['has_is_active']:
-            instance.is_active = False
-            instance.save(update_fields=['is_active'])
+            # Use the SoftDeleteMixin logic through super or directly
+            super().perform_destroy(instance)
         else:
             instance.delete()
 
@@ -149,11 +170,11 @@ class DocketMetadataView(APIView):
     def get(self, request):
         user = request.user
         branches = company_scoped_queryset(
-            Branch.objects.select_related('city', 'city__state').order_by('name'),
+            Branch.objects.select_related('city', 'city__state').order_by('id'),
             user,
         ).filter(is_active=True)
-        cities = City.objects.filter(is_active=True).select_related('state').order_by('name')
-        states = State.objects.order_by('name')
+        cities = City.objects.filter(is_active=True).select_related('state').order_by('id')
+        states = State.objects.order_by('id')
 
         return Response({
             'branches': BranchSerializer(branches, many=True).data,

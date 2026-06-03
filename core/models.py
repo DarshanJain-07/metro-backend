@@ -22,66 +22,6 @@ class Company(models.Model):
     def __str__(self):
         return self.name
 
-class State(models.Model):
-    name = models.CharField(max_length=100, unique=True)
-    code = models.CharField(max_length=5, unique=True, help_text=_("Standard state code (e.g., MH, KA)"))
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ['name']
-
-    def __str__(self):
-        return f"{self.name} ({self.code})"
-
-class City(models.Model):
-    name = models.CharField(max_length=100)
-    state = models.ForeignKey(State, related_name='cities', on_delete=models.CASCADE)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        verbose_name_plural = "Cities"
-        ordering = ['name']
-        constraints = [
-            models.UniqueConstraint(fields=['name', 'state'], name='unique_city_per_state')
-        ]
-
-    def __str__(self):
-        return f"{self.name}, {self.state.code}"
-
-class Branch(models.Model):
-    company = models.ForeignKey(Company, related_name='branches', on_delete=models.CASCADE)
-    name = models.CharField(max_length=255)
-    city = models.ForeignKey(City, related_name='branches', on_delete=models.SET_NULL, null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    is_active = models.BooleanField(default=True)
-
-    class Meta:
-        verbose_name_plural = "Branches"
-        indexes = [
-            GinIndex(
-                name='branch_name_trgm_idx', 
-                fields=['name'], 
-                opclasses=['gin_trgm_ops']
-            )
-        ]
-
-    def __str__(self):
-        return f"{self.name} ({self.company.name})"
-
-class User(AbstractUser):
-    company = models.ForeignKey(Company, related_name='users', on_delete=models.CASCADE, null=True, blank=True)
-    branch = models.ForeignKey(Branch, related_name='users', on_delete=models.SET_NULL, null=True, blank=True)
-    is_owner = models.BooleanField(default=False)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                models.functions.Lower('username'),
-                name='unique_lower_username'
-            )
-        ]
-
 class TenantManager(models.Manager):
     """
     Automatically filters querysets by the current company context.
@@ -153,6 +93,62 @@ class AuditBaseModel(models.Model):
 
         super().save(*args, **kwargs)
 
+class State(AuditBaseModel):
+    name = models.CharField(max_length=100, unique=True)
+    code = models.CharField(max_length=5, unique=True, help_text=_("Standard state code (e.g., MH, KA)"))
+
+    class Meta:
+        ordering = ['id']
+
+    def __str__(self):
+        return f"{self.name} ({self.code})"
+
+class City(AuditBaseModel):
+    name = models.CharField(max_length=100)
+    state = models.ForeignKey(State, related_name='cities', on_delete=models.CASCADE)
+
+    class Meta:
+        verbose_name_plural = "Cities"
+        ordering = ['id']
+        constraints = [
+            models.UniqueConstraint(fields=['name', 'state'], name='unique_city_per_state')
+        ]
+
+    def __str__(self):
+        return f"{self.name}, {self.state.code}"
+
+class Branch(AuditBaseModel):
+    company = models.ForeignKey(Company, related_name='branches', on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+    city = models.ForeignKey(City, related_name='branches', on_delete=models.SET_NULL, null=True, blank=True)
+
+    class Meta:
+        verbose_name_plural = "Branches"
+        ordering = ['id']
+        indexes = [
+            GinIndex(
+                name='branch_name_trgm_idx', 
+                fields=['name'], 
+                opclasses=['gin_trgm_ops']
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.company.name})"
+
+class User(AbstractUser):
+    company = models.ForeignKey(Company, related_name='users', on_delete=models.CASCADE, null=True, blank=True)
+    branch = models.ForeignKey(Branch, related_name='users', on_delete=models.SET_NULL, null=True, blank=True)
+    is_owner = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                models.functions.Lower('username'),
+                name='unique_lower_username'
+            )
+        ]
+
 class Party(AuditBaseModel):
     company = models.ForeignKey(Company, related_name='parties', on_delete=models.CASCADE)
     name = models.CharField(max_length=255)
@@ -174,7 +170,7 @@ class Party(AuditBaseModel):
     class Meta:
         verbose_name_plural = "Parties"
         unique_together = ('company', 'name', 'phone')
-        ordering = ['name']
+        ordering = ['id']
 
     def __str__(self):
         return f"{self.name} ({self.city.name})"

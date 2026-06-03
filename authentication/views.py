@@ -1,5 +1,5 @@
 from django.core.cache import caches
-from rest_framework import status, generics
+from rest_framework import status, generics, viewsets
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import AnonRateThrottle
@@ -9,7 +9,11 @@ from django.db import transaction
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from rest_framework_simplejwt.tokens import RefreshToken
-from .serializers import UserSerializer, ChangePasswordSerializer
+from .serializers import UserSerializer, ChangePasswordSerializer, UserMembershipSerializer
+from .permissions import UserManagementPermission
+from core.models import UserMembership, Role
+from core.policies import has_role, can_manage_company
+from core.request_context import get_current_company
 
 User = get_user_model()
 
@@ -28,7 +32,7 @@ class LoginView(generics.GenericAPIView):
         user = serializer.user
         
         # FIX: Resolve N+1 query issue for the UserSerializer relations
-        user_with_relations = User.objects.select_related('company', 'branch').get(pk=user.pk)
+        user_with_relations = User.objects.select_related('company', 'branch').prefetch_related('memberships', 'memberships__company', 'memberships__branch').get(pk=user.pk)
 
         # Log the login action (triggers Django signals, useful for Audit Trails)
         user_logged_in.send(sender=user_with_relations.__class__, request=request, user=user_with_relations)
@@ -71,3 +75,41 @@ class ChangePasswordView(generics.GenericAPIView):
             "access": str(refresh.access_token),
             "refresh": str(refresh),
         }, status=status.HTTP_200_OK)
+
+class UserViewSet(viewsets.ModelViewSet):
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+    permission_classes = [UserManagementPermission]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_superuser or has_role(user, roles=[Role.PLATFORM_ADMIN]):
+            return User.objects.all()
+        
+        company = get_current_company()
+        if company:
+            return User.objects.filter(company=company)
+        return User.objects.none()
+
+    def perform_create(self, serializer):
+        company = get_current_company()
+        serializer.save(company=company)
+
+class UserMembershipViewSet(viewsets.ModelViewSet):
+    queryset = UserMembership.objects.all()
+    serializer_class = UserMembershipSerializer
+    permission_classes = [UserManagementPermission]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_superuser or has_role(user, roles=[Role.PLATFORM_ADMIN]):
+            return UserMembership.objects.all()
+        
+        company = get_current_company()
+        if company:
+            return UserMembership.objects.filter(company=company)
+        return UserMembership.objects.none()
+
+    def perform_create(self, serializer):
+        company = get_current_company()
+        serializer.save(company=company)

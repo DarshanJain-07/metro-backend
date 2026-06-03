@@ -1,7 +1,7 @@
 from decimal import Decimal
 from django.test import TestCase
 from django.contrib.auth import get_user_model
-from core.models import Company, State, City, Branch
+from core.models import Company, State, City, Branch, Role, UserMembership
 from core.views import MasterDataViewSet
 from dockets.models import Docket, DocketLineItem
 from dockets.serializers import DocketLineItemSerializer, DocketSerializer
@@ -17,6 +17,14 @@ class DocketNestedUpdateTestCase(TestCase):
         self.city = City.objects.create(name="Test City", state=self.state)
         self.branch = Branch.objects.create(company=self.company, name="Test Branch", city=self.city)
         self.user = User.objects.create_user(username="testuser", password="password", company=self.company, branch=self.branch)
+        
+        # Add membership with BRANCH_ADMIN role
+        UserMembership.objects.create(
+            user=self.user,
+            company=self.company,
+            branch=self.branch,
+            role=Role.BRANCH_ADMIN
+        )
         
         self.docket = Docket.objects.create(
             company=self.company,

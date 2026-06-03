@@ -238,6 +238,10 @@ class DocketLineItem(AuditBaseModel):
     charged_weight = models.DecimalField(max_digits=7, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'))
     rate = models.DecimalField(max_digits=7, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))])
     charge = models.DecimalField(max_digits=7, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))])
+    
+    # Rate management fields
+    rate_rule = models.ForeignKey('RateRule', related_name='line_items', on_delete=models.SET_NULL, null=True, blank=True)
+    override_reason = models.TextField(null=True, blank=True)
 
     class Meta:
         verbose_name = _('Docket Line Item')
@@ -253,6 +257,57 @@ class DocketLineItem(AuditBaseModel):
         return f'{self.pieces} {self.package_type} of {self.item_type} for {self.docket}'
 
 
+class RateCard(AuditBaseModel):
+    company = models.ForeignKey('core.Company', related_name='rate_cards', on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+    is_default = models.BooleanField(default=False)
+    effective_from = models.DateTimeField()
+    effective_to = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-effective_from']
+        verbose_name = _('Rate Card')
+        verbose_name_plural = _('Rate Cards')
+
+    def __str__(self):
+        return f"{self.name} ({self.company.name})"
+
+
+class RateRule(AuditBaseModel):
+    rate_card = models.ForeignKey(RateCard, related_name='rules', on_delete=models.CASCADE)
+    origin_city = models.ForeignKey('core.City', related_name='rate_rules_origin', on_delete=models.CASCADE)
+    destination_city = models.ForeignKey('core.City', related_name='rate_rules_destination', on_delete=models.CASCADE)
+    origin_branch = models.ForeignKey('core.Branch', related_name='rate_rules_origin', on_delete=models.CASCADE, null=True, blank=True)
+    destination_branch = models.ForeignKey('core.Branch', related_name='rate_rules_destination', on_delete=models.CASCADE, null=True, blank=True)
+    basis = models.CharField(max_length=50, choices=Docket.BasisChoices.choices)
+    rate_type = models.CharField(max_length=50, choices=DocketLineItem.RateTypeChoices.choices)
+    rate = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))])
+    min_charge = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'), validators=[MinValueValidator(Decimal('0.00'))])
+    delivery_charge = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'), validators=[MinValueValidator(Decimal('0.00'))])
+
+    class Meta:
+        verbose_name = _('Rate Rule')
+        verbose_name_plural = _('Rate Rules')
+
+    def __str__(self):
+        return f"{self.origin_city} to {self.destination_city} - {self.rate_card.name}"
+
+
+class BranchRatePolicy(AuditBaseModel):
+    company = models.ForeignKey('core.Company', related_name='branch_rate_policies', on_delete=models.CASCADE)
+    branch = models.OneToOneField('core.Branch', related_name='rate_policy', on_delete=models.CASCADE)
+    can_override_rate = models.BooleanField(default=False)
+    max_discount_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'), validators=[MinValueValidator(Decimal('0.00'))])
+    requires_approval = models.BooleanField(default=False)
+
+    class Meta:
+        verbose_name = _('Branch Rate Policy')
+        verbose_name_plural = _('Branch Rate Policies')
+
+    def __str__(self):
+        return f"Rate Policy for {self.branch.name}"
+
+
 class DocketSequence(models.Model):
     company = models.ForeignKey('core.Company', on_delete=models.CASCADE)
     date = models.DateField()
@@ -262,3 +317,51 @@ class DocketSequence(models.Model):
         verbose_name = _('Docket Sequence')
         verbose_name_plural = _('Docket Sequences')
         unique_together = ('company', 'date')
+
+
+class DocketStatusEvent(AuditBaseModel):
+    docket = models.ForeignKey(Docket, related_name='status_events', on_delete=models.CASCADE)
+    from_status = models.CharField(max_length=50, choices=Docket.StatusChoices.choices)
+    to_status = models.CharField(max_length=50, choices=Docket.StatusChoices.choices)
+    changed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    branch = models.ForeignKey('core.Branch', on_delete=models.PROTECT)
+    notes = models.TextField(blank=True, null=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = _('Docket Status Event')
+        verbose_name_plural = _('Docket Status Events')
+
+
+class DeliveryAssignment(AuditBaseModel):
+    class StatusChoices(models.TextChoices):
+        ASSIGNED = 'ASSIGNED', _('Assigned')
+        COMPLETED = 'COMPLETED', _('Completed')
+        CANCELLED = 'CANCELLED', _('Cancelled')
+
+    docket = models.ForeignKey(Docket, related_name='delivery_assignments', on_delete=models.CASCADE)
+    delivery_user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='assignments', on_delete=models.PROTECT)
+    assigned_by = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='assigned_by', on_delete=models.PROTECT)
+    status = models.CharField(max_length=50, choices=StatusChoices.choices, default=StatusChoices.ASSIGNED)
+    assigned_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-assigned_at']
+        verbose_name = _('Delivery Assignment')
+        verbose_name_plural = _('Delivery Assignments')
+
+
+class ProofOfDelivery(AuditBaseModel):
+    docket = models.OneToOneField(Docket, related_name='pod', on_delete=models.CASCADE)
+    received_by_name = models.CharField(max_length=100)
+    received_by_phone = models.CharField(
+        max_length=10, 
+        validators=[RegexValidator(r'^\d{10}$', _('Phone number must be exactly 10 digits.'))]
+    )
+    delivery_notes = models.TextField(blank=True, null=True)
+    delivered_at = models.DateTimeField()
+
+    class Meta:
+        verbose_name = _('Proof of Delivery')
+        verbose_name_plural = _('Proofs of Delivery')

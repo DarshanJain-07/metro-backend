@@ -2,6 +2,8 @@ import contextvars
 
 _current_user = contextvars.ContextVar('current_user', default=None)
 _current_company = contextvars.ContextVar('current_company', default=None)
+_current_branch = contextvars.ContextVar('current_branch', default=None)
+_current_role = contextvars.ContextVar('current_role', default=None)
 _current_request = contextvars.ContextVar('current_request', default=None)
 _request_method = contextvars.ContextVar('request_method', default=None)
 _use_primary = contextvars.ContextVar('use_primary', default=False)
@@ -40,12 +42,20 @@ def reset_current_user(token):
     _current_user.reset(token)
 
 
-def get_current_company():
+def get_current_company(user=None):
     company = _current_company.get()
     if company is not None:
         return company
 
-    user = get_current_user()
+    request = get_current_request()
+    if request:
+        company = getattr(request, 'current_company', None)
+        if company:
+            return company
+
+    if user is None:
+        user = get_current_user()
+        
     if user and getattr(user, 'is_authenticated', False):
         return getattr(user, 'company', None)
 
@@ -58,6 +68,55 @@ def set_current_company(company):
 
 def reset_current_company(token):
     _current_company.reset(token)
+
+
+def get_current_branch(user=None):
+    branch = _current_branch.get()
+    if branch is not None:
+        return branch
+
+    request = get_current_request()
+    if request:
+        branch = getattr(request, 'current_branch', None)
+        if branch:
+            return branch
+
+    if user is None:
+        user = get_current_user()
+        
+    if user and getattr(user, 'is_authenticated', False):
+        branch = getattr(user, 'branch', None)
+        if branch:
+            return branch
+        
+        # Fallback for membership-based users
+        membership = getattr(user, 'memberships', None)
+        if membership:
+            active_membership = membership.filter(is_active=True).first()
+            if active_membership:
+                return active_membership.branch
+
+    return None
+
+
+def set_current_branch(branch):
+    return _current_branch.set(branch)
+
+
+def reset_current_branch(token):
+    _current_branch.reset(token)
+
+
+def get_current_role():
+    return _current_role.get()
+
+
+def set_current_role(role):
+    return _current_role.set(role)
+
+
+def reset_current_role(token):
+    _current_role.reset(token)
 
 
 def get_request_method():

@@ -32,19 +32,30 @@ class TenantBranchScopedQuerysetMixin:
         if not user or not user.is_authenticated:
             return qs.none()
 
-        if getattr(user, 'is_owner', False):
+        from core.policies import has_role
+        from core.models import Role
+        from core.request_context import get_current_company
+
+        if user.is_superuser or has_role(user, roles=[Role.PLATFORM_ADMIN]):
+            return qs
+
+        company = get_current_company()
+        if company and has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN]):
             return qs
 
         if self.branch_scope_permission and user.has_perm(self.branch_scope_permission):
             return qs
 
-        branch = getattr(user, 'branch', None)
-        if not branch:
+        active_branches = list(user.memberships.filter(
+            company=company, 
+            is_active=True
+        ).values_list('branch', flat=True))
+        if not active_branches:
             return qs.none()
 
         branch_filter = models.Q()
         for field_name in self.branch_scope_fields:
-            branch_filter |= models.Q(**{field_name: branch})
+            branch_filter |= models.Q(**{f"{field_name}__in": active_branches})
 
         return qs.filter(branch_filter)
 

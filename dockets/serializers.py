@@ -1,8 +1,31 @@
 from decimal import Decimal, ROUND_HALF_UP
 from django.db import transaction
 from rest_framework import serializers
-from .models import Docket, DocketLineItem
+from core.request_context import get_current_company
+from .models import Docket, DocketLineItem, DocketStatusEvent, DeliveryAssignment, ProofOfDelivery
 from .tasks import send_status_update_notification
+from .services import lookup_rate, get_branch_rate_policy
+
+class ProofOfDeliverySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProofOfDelivery
+        fields = ['received_by_name', 'received_by_phone', 'delivery_notes', 'delivered_at']
+
+class DocketStatusEventSerializer(serializers.ModelSerializer):
+    changed_by_name = serializers.ReadOnlyField(source='changed_by.username')
+    branch_name = serializers.ReadOnlyField(source='branch.name')
+
+    class Meta:
+        model = DocketStatusEvent
+        fields = ['id', 'from_status', 'to_status', 'changed_by', 'changed_by_name', 'branch', 'branch_name', 'notes', 'created_at']
+
+class DeliveryAssignmentSerializer(serializers.ModelSerializer):
+    delivery_user_name = serializers.ReadOnlyField(source='delivery_user.username')
+    assigned_by_name = serializers.ReadOnlyField(source='assigned_by.username')
+
+    class Meta:
+        model = DeliveryAssignment
+        fields = ['id', 'delivery_user', 'delivery_user_name', 'assigned_by', 'assigned_by_name', 'status', 'assigned_at', 'completed_at']
 
 class DocketLineItemSerializer(serializers.ModelSerializer):
     id = serializers.CharField(required=False)
@@ -11,8 +34,10 @@ class DocketLineItemSerializer(serializers.ModelSerializer):
         model = DocketLineItem
         fields = [
             'id', 'item_type', 'package_type', 'rate_type', 
-            'pieces', 'actual_weight', 'charged_weight', 'rate', 'charge'
+            'pieces', 'actual_weight', 'charged_weight', 'rate', 'charge',
+            'rate_rule', 'override_reason'
         ]
+        read_only_fields = ['rate_rule']
 
     def validate(self, data):
         # Merge data with instance for partial updates (PATCH)
@@ -49,6 +74,8 @@ class DocketListSerializer(serializers.ModelSerializer):
     destination_branch_name = serializers.ReadOnlyField(source='destination_branch.name')
     to_city_name = serializers.ReadOnlyField(source='to_city.name')
     total_amount = serializers.ReadOnlyField(source='final_freight')
+    assigned_delivery_user = serializers.SerializerMethodField()
+    latest_status_event_timestamp = serializers.SerializerMethodField()
 
     class Meta:
         model = Docket
@@ -58,8 +85,17 @@ class DocketListSerializer(serializers.ModelSerializer):
             'to_city_name',
             'consignor_name', 'consignee_name',
             'total_packages', 'final_freight', 'total_amount',
-            'remaining_balance', 'payment_type',
+            'remaining_balance', 'payment_type', 'delivery_type',
+            'assigned_delivery_user', 'latest_status_event_timestamp'
         ]
+
+    def get_assigned_delivery_user(self, obj):
+        assignment = obj.delivery_assignments.filter(status='ASSIGNED').first()
+        return assignment.delivery_user.username if assignment else None
+
+    def get_latest_status_event_timestamp(self, obj):
+        event = obj.status_events.order_by('-created_at').first()
+        return event.created_at if event else None
 
 class DocketSerializer(serializers.ModelSerializer):
     created_by_name = serializers.ReadOnlyField(source='created_by.username')
@@ -68,6 +104,10 @@ class DocketSerializer(serializers.ModelSerializer):
     origin_branch_name = serializers.ReadOnlyField(source='origin_branch.name')
     destination_branch_name = serializers.ReadOnlyField(source='destination_branch.name')
     line_items = DocketLineItemSerializer(many=True)
+    status_events = DocketStatusEventSerializer(many=True, read_only=True)
+    delivery_assignments = DeliveryAssignmentSerializer(many=True, read_only=True)
+    assigned_delivery_user = serializers.SerializerMethodField()
+    latest_status_event_timestamp = serializers.SerializerMethodField()
 
     class Meta:
         model = Docket
@@ -83,7 +123,8 @@ class DocketSerializer(serializers.ModelSerializer):
             'freight', 'additional_charges', 'delivery_charge', 
             'final_freight', 'advance_amount', 'remaining_balance', 
             'total_packages', 'total_actual_weight', 'total_charge_weight', 
-            'line_items',
+            'line_items', 'status_events', 'delivery_assignments',
+            'assigned_delivery_user', 'latest_status_event_timestamp',
             'created_at', 'updated_at', 'created_by', 'updated_by',
             'created_by_name', 'updated_by_name'
         ]
@@ -93,6 +134,14 @@ class DocketSerializer(serializers.ModelSerializer):
             'created_by', 'updated_by', 'company',
             'freight', 'total_packages', 'total_actual_weight', 'total_charge_weight'
         ]
+
+    def get_assigned_delivery_user(self, obj):
+        assignment = obj.delivery_assignments.filter(status='ASSIGNED').first()
+        return assignment.delivery_user.username if assignment else None
+
+    def get_latest_status_event_timestamp(self, obj):
+        event = obj.status_events.order_by('-created_at').first()
+        return event.created_at if event else None
 
     def to_internal_value(self, data):
         data = data.copy()
@@ -107,20 +156,36 @@ class DocketSerializer(serializers.ModelSerializer):
         if not self.instance:
             request = self.context.get('request')
             user = getattr(request, 'user', None)
-            branch = getattr(user, 'branch', None)
 
-            if not branch:
-                raise serializers.ValidationError({
-                    "detail": "You must be assigned to a branch before creating dockets."
-                })
-
-            if not branch.city_id:
-                raise serializers.ValidationError({
-                    "from_city": "Your branch must have a city before creating dockets."
-                })
-
-            data['origin_branch'] = branch.pk
-            data['from_city'] = branch.city_id
+            # If origin_branch is not provided, try to infer it
+            if 'origin_branch' not in data and user:
+                active_branches = user.memberships.filter(is_active=True).values_list('branch', flat=True)
+                active_branches = [b for b in active_branches if b is not None]
+                
+                if len(active_branches) == 1:
+                    from core.models import Branch
+                    branch = Branch.objects.get(pk=active_branches[0])
+                    data['origin_branch'] = branch.pk
+                    if branch.city_id:
+                        data['from_city'] = branch.city_id
+                elif len(active_branches) > 1:
+                    raise serializers.ValidationError({
+                        "origin_branch": "You belong to multiple branches. Please specify an origin_branch."
+                    })
+                else:
+                    # User has no active branch memberships, but might be a platform/client admin
+                    # Let field-level validation handle it if origin_branch is missing
+                    pass
+            
+            # If from_city is not provided but origin_branch is, infer it
+            if 'from_city' not in data and 'origin_branch' in data:
+                from core.models import Branch
+                try:
+                    branch = Branch.objects.get(pk=data['origin_branch'])
+                    if branch.city_id:
+                        data['from_city'] = branch.city_id
+                except Branch.DoesNotExist:
+                    pass
 
         # Normalize fields before field-level validation
         if 'gst_number' in data and data['gst_number']:
@@ -139,7 +204,7 @@ class DocketSerializer(serializers.ModelSerializer):
         if not request or not request.user:
             return data
             
-        company = request.user.company
+        company = get_current_company()
         user = request.user
         origin_branch = data.get('origin_branch')
         dest_branch = data.get('destination_branch')
@@ -185,32 +250,30 @@ class DocketSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"destination_branch": "Destination branch is not active."})
 
         # Branch Authorization Check
-        if not user.is_owner:
+        from core.policies import has_role, can_create_docket, can_edit_docket
+        from core.models import Role
+
+        if not user.is_superuser and not has_role(user, roles=[Role.PLATFORM_ADMIN]):
             if not self.instance:
                 # Creating a new docket
-                if not user.has_perm('dockets.add_docket_all_branches'):
-                    if user.branch:
-                        if origin_branch and origin_branch != user.branch:
-                            raise serializers.ValidationError({"origin_branch": "You can only create dockets for your own branch."})
-                    else:
-                        raise serializers.ValidationError({"detail": "You must be assigned to a branch or have special permissions to create/update dockets."})
+                resolved_origin = origin_branch or getattr(self.instance, 'origin_branch', None)
+                if not resolved_origin:
+                     raise serializers.ValidationError({"origin_branch": "Origin branch is required."})
+                
+                can_create = can_create_docket(user, resolved_origin)
+                
+                if not can_create:
+                    raise serializers.ValidationError({"origin_branch": "You do not have permission to create dockets for this origin branch."})
             else:
                 # Updating an existing docket
-                if not user.branch and not user.has_perm('dockets.reassign_all_branches'):
-                    raise serializers.ValidationError({"detail": "You must be assigned to a branch or have special permissions to create/update dockets."})
+                if not can_edit_docket(user, self.instance):
+                    raise serializers.ValidationError({"detail": "You do not have permission to update this docket."})
                 
-                if not user.has_perm('dockets.reassign_all_branches'):
-                    # User must be currently associated with origin or destination
-                    if self.instance.origin_branch != user.branch and self.instance.destination_branch != user.branch:
-                        raise serializers.ValidationError({"detail": "You do not have permission to update this docket."})
-                    
-                    # AND they cannot move it entirely away from their branch unless they have reassign permission
-                    new_origin = origin_branch or self.instance.origin_branch
-                    new_dest = dest_branch or self.instance.destination_branch
-                    
-                    if new_origin != user.branch and new_dest != user.branch:
+                # Check if they are trying to reassign origin branch and they don't have permission for the new one
+                if origin_branch and origin_branch != self.instance.origin_branch:
+                    if not can_create_docket(user, origin_branch):
                         raise serializers.ValidationError({
-                            "detail": "You cannot reassign this docket away from your branch."
+                            "origin_branch": "You do not have permission to assign to this origin branch."
                         })
 
         # Status Transition Logic
@@ -232,6 +295,54 @@ class DocketSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     "status": f"Invalid transition. Cannot change status from {old_status} to {new_status}."
                 })
+
+        # Rate Validation
+        if resolved_origin_branch and resolved_dest_branch:
+            basis = data.get('basis', getattr(self.instance, 'basis', Docket.BasisChoices.WEIGHT))
+            policy = get_branch_rate_policy(company, resolved_origin_branch)
+            rule = lookup_rate(company, resolved_origin_branch, resolved_dest_branch, basis)
+            
+            if line_items_data:
+                for item_data in line_items_data:
+                    # Resolve rate_type from data or instance
+                    item_instance = None
+                    if self.instance and item_data.get('id'):
+                        item_instance = self.context.get('line_item_instances_by_id', {}).get(item_data['id'])
+                    
+                    rate_type = item_data.get('rate_type', getattr(item_instance, 'rate_type', DocketLineItem.RateTypeChoices.PER_KG))
+                    
+                    if rule:
+                        # Store rule ID in a temporary field for create/update to handle
+                        item_data['_rate_rule_id'] = rule.id
+                        
+                        standard_rate = rule.rate
+                        submitted_rate = item_data.get('rate')
+                        
+                        # If rate not provided in partial update, it's not being changed
+                        if submitted_rate is None and item_instance:
+                            submitted_rate = item_instance.rate
+
+                        if submitted_rate is not None and submitted_rate != standard_rate:
+                            # Super admins and Platform admins can override anything
+                            from core.models import Role
+                            if not user.is_superuser and not has_role(user, roles=[Role.PLATFORM_ADMIN]):
+                                if not policy.can_override_rate:
+                                    raise serializers.ValidationError({
+                                        "line_items": f"Branch {resolved_origin_branch.name} is not allowed to override rates."
+                                    })
+                                
+                                # Check discount limit
+                                if standard_rate > 0:
+                                    discount = ((standard_rate - submitted_rate) / standard_rate) * 100
+                                    if discount > policy.max_discount_percent:
+                                        raise serializers.ValidationError({
+                                            "line_items": f"Rate override exceeds maximum allowed discount of {policy.max_discount_percent}%."
+                                        })
+                                
+                                if not item_data.get('override_reason') and not getattr(item_instance, 'override_reason', None):
+                                    raise serializers.ValidationError({
+                                        "line_items": "Override reason is required when manual rate override is used."
+                                    })
 
         return data
 
@@ -272,6 +383,11 @@ class DocketSerializer(serializers.ModelSerializer):
                 item_data['created_by'] = created_by
             if updated_by:
                 item_data['updated_by'] = updated_by
+            
+            rate_rule_id = item_data.pop('_rate_rule_id', None)
+            if rate_rule_id:
+                item_data['rate_rule_id'] = rate_rule_id
+                
             DocketLineItem.objects.create(docket=docket, **item_data)
 
         # Recalculate totals from the saved DB objects
@@ -371,6 +487,8 @@ class DocketSerializer(serializers.ModelSerializer):
             updated_by = validated_data.get('updated_by')
             for item_data in line_items_data:
                 item_id = item_data.get('id')
+                rate_rule_id = item_data.pop('_rate_rule_id', None)
+                
                 if item_id:
                     if item_id in item_mapping:
                         # Update existing item
@@ -378,6 +496,10 @@ class DocketSerializer(serializers.ModelSerializer):
                         for attr, value in item_data.items():
                             if attr != 'id':
                                 setattr(item, attr, value)
+                        
+                        if rate_rule_id:
+                            item.rate_rule_id = rate_rule_id
+                            
                         if updated_by:
                             item.updated_by = updated_by
                         item.save()
@@ -391,6 +513,10 @@ class DocketSerializer(serializers.ModelSerializer):
                     if updated_by:
                         item_data['created_by'] = updated_by
                         item_data['updated_by'] = updated_by
+                    
+                    if rate_rule_id:
+                        item_data['rate_rule_id'] = rate_rule_id
+                        
                     DocketLineItem.objects.create(docket=instance, **item_data)
             
             # Recalculate totals directly from the saved DB objects
@@ -414,7 +540,4 @@ class DocketSerializer(serializers.ModelSerializer):
                 lambda: send_status_update_notification.delay(instance.id, old_status_val, new_status_val)
             )
 
-        return instance
-
-                
         return instance

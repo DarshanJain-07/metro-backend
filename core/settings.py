@@ -65,6 +65,7 @@ INSTALLED_APPS = [
     'core',
     'authentication',
     'dockets',
+    'accounts',
 ]
 
 AUTH_USER_MODEL = 'core.User'
@@ -116,6 +117,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'core.middleware.TenantMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'core.middleware.RequestMethodMiddleware',
@@ -135,6 +137,8 @@ CORS_ALLOW_HEADERS = [
     'x-requested-with',
     'x-idempotency-key',
     'x-use-primary-db',
+    'x-company-id',
+    'x-branch-id',
 ]
 
 

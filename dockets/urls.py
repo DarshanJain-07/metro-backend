@@ -1,18 +1,13 @@
-from django.urls import path
-from .views import DocketViewSet
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from .views import DocketViewSet, RateCardViewSet, RateRuleViewSet, BranchRatePolicyViewSet
 
-docket_list = DocketViewSet.as_view({
-    'get': 'list',
-})
-
-docket_detail = DocketViewSet.as_view({
-    'get': 'retrieve',
-    'put': 'update',
-    'patch': 'partial_update',
-    'delete': 'destroy',
-})
+router = DefaultRouter()
+router.register(r'rate-cards', RateCardViewSet, basename='rate-card')
+router.register(r'rate-rules', RateRuleViewSet, basename='rate-rule')
+router.register(r'branch-rate-policies', BranchRatePolicyViewSet, basename='branch-rate-policy')
+router.register(r'', DocketViewSet, basename='docket')
 
 urlpatterns = [
-    path('', docket_list, name='docket-list'),
-    path('<pk>/', docket_detail, name='docket-detail'),
+    path('', include(router.urls)),
 ]

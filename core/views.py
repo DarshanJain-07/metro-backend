@@ -4,6 +4,8 @@ from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.http import Http404
+from django.db import models
+from django.db.models import Sum, Count, F
 
 from .models import Branch, City, Party, State
 from .serializers import BranchSerializer, CitySerializer, PartySerializer, StateSerializer
@@ -14,44 +16,102 @@ from .viewsets import (
 )
 
 
-def user_can_see_all_companies(user):
-    return bool(getattr(user, 'is_superuser', False) or getattr(user, 'is_owner', False))
+from core.policies import has_role, can_manage_company
+from core.models import Role
+from core.request_context import get_current_company, get_current_branch
 
 
 def company_scoped_queryset(queryset, user):
-    if getattr(user, 'company_id', None):
-        return queryset.filter(company=user.company)
-    if user_can_see_all_companies(user):
+    if not user.is_authenticated:
+        return queryset.none()
+    if user.is_superuser or has_role(user, roles=[Role.PLATFORM_ADMIN]):
         return queryset
-    return queryset.none()
+        
+    company = get_current_company()
+    if not company:
+        return queryset.none()
+        
+    qs = queryset.filter(company=company)
+    
+    if not has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN]):
+        active_branches = list(user.memberships.filter(is_active=True).values_list('branch', flat=True))
+        if hasattr(queryset.model, 'branch'):
+            qs = qs.filter(models.Q(branch__in=active_branches) | models.Q(branch__isnull=True))
+    return qs
 
 
 class ActionModelPermission(BasePermission):
     """
-    Require standard Django model permissions for mutating viewset actions.
+    Require standard policy checks for mutating viewset actions.
     List and retrieve still require authentication through IsAuthenticated.
     """
-
-    permission_map = {
-        'create': 'add',
-        'update': 'change',
-        'partial_update': 'change',
-        'destroy': 'delete',
-    }
 
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
-        if request.user.is_superuser or getattr(request.user, 'is_owner', False):
+            
+        if request.user.is_superuser or has_role(request.user, roles=[Role.PLATFORM_ADMIN]):
             return True
 
-        perm_action = self.permission_map.get(getattr(view, 'action', None))
-        if not perm_action:
+        action = getattr(view, 'action', None)
+        if action in ['list', 'retrieve']:
             return True
 
-        queryset = view.get_queryset()
-        model = queryset.model
-        return request.user.has_perm(f'{model._meta.app_label}.{perm_action}_{model._meta.model_name}')
+        config = getattr(view, '_get_config', lambda: None)()
+        if not config:
+            return True
+
+        # If not company scoped (like State, City), only Platform Admin can mutate
+        if not config.get('company_scoped'):
+            return False 
+
+        company = get_current_company() or getattr(request.user, 'company', None)
+        if company and can_manage_company(request.user, company):
+            return True
+
+        return False
+
+
+class DashboardStatsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        company = get_current_company()
+        if not company:
+            return Response({"error": "No company context found"}, status=400)
+
+        # To avoid circular imports
+        from dockets.models import Docket
+        from accounts.models import Invoice, PaymentReceipt
+
+        # Filter dockets by company
+        dockets = Docket.objects.filter(company=company)
+        invoices = Invoice.objects.filter(company=company)
+        payments = PaymentReceipt.objects.filter(company=company)
+
+        # If branch admin or below, further filter by branch
+        branch_id = request.query_params.get('branch_id')
+        if branch_id:
+            dockets = dockets.filter(models.Q(origin_branch_id=branch_id) | models.Q(destination_branch_id=branch_id))
+            invoices = invoices.filter(branch_id=branch_id)
+            payments = payments.filter(branch_id=branch_id)
+        elif not has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN, Role.PLATFORM_ADMIN]):
+            active_branches = list(user.memberships.filter(is_active=True).values_list('branch', flat=True))
+            dockets = dockets.filter(models.Q(origin_branch_id__in=active_branches) | models.Q(destination_branch_id__in=active_branches))
+            invoices = invoices.filter(branch_id__in=active_branches)
+            payments = payments.filter(branch_id__in=active_branches)
+
+        stats = {
+            "total_dockets": dockets.count(),
+            "pending_deliveries": dockets.filter(status='IN_TRANSIT').count(),
+            "total_revenue": invoices.aggregate(Sum('total_amount'))['total_amount__sum'] or 0,
+            "total_receivables": (invoices.aggregate(Sum('total_amount'))['total_amount__sum'] or 0) - (invoices.aggregate(Sum('paid_amount'))['paid_amount__sum'] or 0),
+            "recent_dockets": dockets.order_by('-created_at')[:5].annotate(total_amount=F('final_freight')).values('docket_no', 'status', 'total_amount', 'date'),
+            "docket_status_distribution": list(dockets.values('status').annotate(count=Count('id')))
+        }
+
+        return Response(stats)
 
 
 class MasterDataViewSet(
@@ -176,10 +236,11 @@ class DocketMetadataView(APIView):
         cities = City.objects.filter(is_active=True).select_related('state').order_by('id')
         states = State.objects.order_by('id')
 
+        branch = get_current_branch(user)
         return Response({
             'branches': BranchSerializer(branches, many=True).data,
             'cities': CitySerializer(cities, many=True).data,
             'states': StateSerializer(states, many=True).data,
             'parties': [],
-            'user_branch': user.branch_id,
+            'user_branch': branch.id if branch else None,
         })

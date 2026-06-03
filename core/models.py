@@ -24,16 +24,46 @@ class Company(models.Model):
 
 class TenantManager(models.Manager):
     """
-    Automatically filters querysets by the current company context.
+    Automatically filters querysets by the current company context and user roles.
     """
     def get_queryset(self):
         qs = super().get_queryset()
-        company = get_current_company()
+        user = get_current_user()
         
-        # Only filter if a company is set in the middleware context
-        # and the model actually has a company field.
+        if not user or not user.is_authenticated:
+            return qs
+
+        from core.policies import has_role
+        from core.models import Role
+
+        # Platform admins see everything
+        if user.is_superuser or has_role(user, roles=[Role.PLATFORM_ADMIN]):
+            return qs
+
+        company = get_current_company()
         if company and hasattr(self.model, 'company'):
-            return qs.filter(company=company)
+            qs = qs.filter(company=company)
+        
+        # Enforce branch scoping for non-Client Super Admins
+        if company and not has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN]):
+            from core.models import UserMembership
+            active_branches = UserMembership.unscoped_objects.filter(
+                user=user, 
+                company=company, 
+                is_active=True
+            ).values_list('branch', flat=True)
+            
+            # For models with a direct 'branch' reference
+            if hasattr(self.model, 'branch'):
+                qs = qs.filter(models.Q(branch__in=active_branches) | models.Q(branch__isnull=True))
+                
+            # For Dockets which use origin_branch and destination_branch
+            elif hasattr(self.model, 'origin_branch') and hasattr(self.model, 'destination_branch'):
+                qs = qs.filter(
+                    models.Q(origin_branch__in=active_branches) | 
+                    models.Q(destination_branch__in=active_branches)
+                )
+
         return qs
 
 class AuditBaseModel(models.Model):
@@ -125,6 +155,9 @@ class Branch(AuditBaseModel):
     class Meta:
         verbose_name_plural = "Branches"
         ordering = ['id']
+        constraints = [
+            models.UniqueConstraint(fields=['company', 'name'], name='unique_branch_per_company')
+        ]
         indexes = [
             GinIndex(
                 name='branch_name_trgm_idx', 
@@ -149,6 +182,36 @@ class User(AbstractUser):
             )
         ]
 
+class Role(models.TextChoices):
+    PLATFORM_ADMIN = 'PLATFORM_ADMIN', _('Platform Admin')
+    CLIENT_SUPER_ADMIN = 'CLIENT_SUPER_ADMIN', _('Client Super Admin')
+    BRANCH_ADMIN = 'BRANCH_ADMIN', _('Branch Admin')
+    BOOKING_USER = 'BOOKING_USER', _('Booking User')
+    DELIVERY_USER = 'DELIVERY_USER', _('Delivery User')
+    ACCOUNTANT = 'ACCOUNTANT', _('Accountant')
+    VIEWER = 'VIEWER', _('Viewer')
+
+class UserMembership(AuditBaseModel):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='memberships', on_delete=models.CASCADE)
+    company = models.ForeignKey(Company, related_name='memberships', on_delete=models.CASCADE)
+    branch = models.ForeignKey(Branch, related_name='memberships', on_delete=models.CASCADE, null=True, blank=True)
+    role = models.CharField(max_length=50, choices=Role.choices)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'company', 'branch', 'role'],
+                name='unique_user_membership'
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(role__in=[Role.BRANCH_ADMIN, Role.BOOKING_USER, Role.DELIVERY_USER]) | models.Q(branch__isnull=False),
+                name='active_branch_required_for_operational_roles'
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} - {self.company.name} - {self.role}"
+
 class Party(AuditBaseModel):
     company = models.ForeignKey(Company, related_name='parties', on_delete=models.CASCADE)
     name = models.CharField(max_length=255)
@@ -169,8 +232,15 @@ class Party(AuditBaseModel):
 
     class Meta:
         verbose_name_plural = "Parties"
-        unique_together = ('company', 'name', 'phone')
         ordering = ['id']
+        constraints = [
+            models.UniqueConstraint(
+                models.functions.Lower('name'),
+                'phone',
+                'company',
+                name='unique_party_per_company'
+            )
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.city.name})"

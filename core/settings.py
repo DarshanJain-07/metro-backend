@@ -64,7 +64,7 @@ INSTALLED_APPS = [
     'django_filters',
     'core',
     'authentication',
-    'dockets',
+    'shipments',
     'accounts',
 ]
 
@@ -123,8 +123,8 @@ MIDDLEWARE = [
     'core.middleware.RequestMethodMiddleware',
 ]
 
-# Updated format: {DD}{MM}{YY}{SEQ:3} to match user request like DDMMYY398
-DOCKET_FORMAT = os.environ.get('DOCKET_FORMAT', '{DD}{MM}{YY}{SEQ:3}')
+# LR format: {DD}{MM}{YY}{SEQ:3} to match requests like DDMMYY398.
+LR_FORMAT = os.environ.get('LR_FORMAT', '{DD}{MM}{YY}{SEQ:3}')
 
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOWED_ORIGINS = os.environ.get('DJANGO_CORS_ORIGINS', 'http://localhost:3000').split(',')
@@ -138,7 +138,7 @@ CORS_ALLOW_HEADERS = [
     'x-idempotency-key',
     'x-use-primary-db',
     'x-company-id',
-    'x-branch-id',
+    'x-office-id',
 ]
 
 

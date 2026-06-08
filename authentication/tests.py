@@ -2,12 +2,15 @@ from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
-from core.models import User, Company, Role, UserMembership
+from core.models import City, Company, CompanyOffice, Role, State, User, UserMembership
 
 class UserPermissionsTestCase(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.company = Company.objects.create(name="Test Company")
+        self.state = State.objects.create(name="Test State", code="TS")
+        self.city = City.objects.create(name="Test City", state=self.state)
+        self.office = CompanyOffice.objects.create(company=self.company, name="Test Office", city=self.city)
         
         # Superuser
         self.superuser = User.objects.create_superuser(username="admin", password="password", email="admin@test.com")
@@ -17,8 +20,8 @@ class UserPermissionsTestCase(TestCase):
         UserMembership.objects.create(user=self.client_admin, company=self.company, role=Role.CLIENT_SUPER_ADMIN)
         
         # Normal User
-        self.normal_user = User.objects.create_user(username="normal_user", password="password", company=self.company)
-        UserMembership.objects.create(user=self.normal_user, company=self.company, role=Role.VIEWER)
+        self.normal_user = User.objects.create_user(username="normal_user", password="password", company=self.company, office=self.office)
+        UserMembership.objects.create(user=self.normal_user, company=self.company, office=self.office, role=Role.VIEWER)
 
     def test_normal_user_cannot_create_user(self):
         self.client.force_authenticate(user=self.normal_user)
@@ -36,8 +39,11 @@ class UserPermissionsTestCase(TestCase):
         url = reverse('user-list')
         data = {
             "username": "new_user_by_admin",
-            "password": "password123",
-            "email": "new_admin@test.com"
+            "password": "StrongPass123!",
+            "email": "new_admin@test.com",
+            "membership_inputs": [
+                {"office": self.office.id, "role": Role.VIEWER}
+            ]
         }
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -86,6 +92,7 @@ class UserPermissionsTestCase(TestCase):
         data = {
             "user": self.normal_user.pk,
             "company": self.company.pk,
+            "office": self.office.id,
             "role": Role.ACCOUNTANT
         }
         response = self.client.post(url, data, format='json')

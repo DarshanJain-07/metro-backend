@@ -9,31 +9,30 @@ from rest_framework.response import Response
 
 class PreconditionFailed(APIException):
     status_code = status.HTTP_412_PRECONDITION_FAILED
-    default_detail = 'The record has been updated by another user. Please refresh and try again.'
-    default_code = 'precondition_failed'
+    default_detail = "The record has been updated by another user. Please refresh and try again."
+    default_code = "precondition_failed"
 
 
 class ConflictException(APIException):
     status_code = status.HTTP_409_CONFLICT
-    default_detail = 'A different request was already made with this idempotency key.'
-    default_code = 'idempotency_conflict'
+    default_detail = "A different request was already made with this idempotency key."
+    default_code = "idempotency_conflict"
 
 
-class TenantBranchScopedQuerysetMixin:
-    branch_scope_permission = None
-    branch_scope_fields = ('origin_branch', 'destination_branch')
+class TenantOfficeScopedQuerysetMixin:
+    office_scope_permission = None
+    office_scope_fields = ("origin_office", "destination_office")
 
     def get_queryset(self):
-        return self.apply_branch_scope(super().get_queryset())
+        return self.apply_office_scope(super().get_queryset())
 
-    def apply_branch_scope(self, qs):
-        user = getattr(self.request, 'user', None)
-
+    def apply_office_scope(self, qs):
+        user = getattr(self.request, "user", None)
         if not user or not user.is_authenticated:
             return qs.none()
 
-        from core.policies import active_branch_ids, has_role
         from core.models import Role
+        from core.policies import active_office_ids, has_role
         from core.request_context import get_current_company
 
         if user.is_superuser or has_role(user, roles=[Role.PLATFORM_ADMIN]):
@@ -43,22 +42,21 @@ class TenantBranchScopedQuerysetMixin:
         if company and has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN]):
             return qs
 
-        if self.branch_scope_permission and user.has_perm(self.branch_scope_permission):
+        if self.office_scope_permission and user.has_perm(self.office_scope_permission):
             return qs
 
-        active_branches = active_branch_ids(user, company)
-        if not active_branches:
+        office_ids = active_office_ids(user, company)
+        if not office_ids:
             return qs.none()
 
-        branch_filter = models.Q()
-        for field_name in self.branch_scope_fields:
-            branch_filter |= models.Q(**{f"{field_name}__in": active_branches})
-
-        return qs.filter(branch_filter)
+        office_filter = models.Q()
+        for field_name in self.office_scope_fields:
+            office_filter |= models.Q(**{f"{field_name}__in": office_ids})
+        return qs.filter(office_filter)
 
 
 class SoftDeleteMixin:
-    soft_delete_field = 'is_active'
+    soft_delete_field = "is_active"
 
     def perform_destroy(self, instance):
         setattr(instance, self.soft_delete_field, False)
@@ -66,33 +64,30 @@ class SoftDeleteMixin:
 
 
 class OptimisticConcurrencyMixin:
-    concurrency_field = 'updated_at'
+    concurrency_field = "updated_at"
 
     def perform_update(self, serializer):
         self.check_precondition(serializer.instance)
         serializer.save()
 
     def check_precondition(self, instance):
-        if self.request.method not in ('PUT', 'PATCH'):
+        if self.request.method not in ("PUT", "PATCH"):
             return
-
         client_value = self.request.data.get(self.concurrency_field)
         if not client_value:
             raise PreconditionFailed(detail=f"Missing {self.concurrency_field} for concurrency check.")
-
         try:
             parsed_client_value = serializers.DateTimeField().to_internal_value(client_value)
         except serializers.ValidationError:
             raise PreconditionFailed(detail=f"Invalid {self.concurrency_field} format for concurrency check.")
-
         if getattr(instance, self.concurrency_field) != parsed_client_value:
             raise PreconditionFailed()
 
 
 class IdempotentCreateMixin:
-    idempotency_key_field = 'idempotency_key'
-    idempotency_hash_field = 'idempotency_hash'
-    idempotency_header = 'X-Idempotency-Key'
+    idempotency_key_field = "idempotency_key"
+    idempotency_hash_field = "idempotency_hash"
+    idempotency_header = "X-Idempotency-Key"
 
     def create(self, request, *args, **kwargs):
         idempotency_key = self.get_idempotency_key()
@@ -105,10 +100,8 @@ class IdempotentCreateMixin:
             existing_hash = getattr(existing, self.idempotency_hash_field, None)
             if existing_hash != request_hash:
                 raise ConflictException()
-
             serializer = self.get_serializer(existing)
-            headers = {'X-Idempotency-Hit': 'true'}
-            return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+            return Response(serializer.data, status=status.HTTP_201_CREATED, headers={"X-Idempotency-Hit": "true"})
 
         self._idempotency_values = {
             self.idempotency_key_field: idempotency_key,
@@ -120,13 +113,12 @@ class IdempotentCreateMixin:
             self._idempotency_values = None
 
     def get_idempotency_key(self):
-        key = self.request.data.get(self.idempotency_key_field) or self.request.headers.get(self.idempotency_header)
-        return key or None
+        return self.request.data.get(self.idempotency_key_field) or self.request.headers.get(self.idempotency_header) or None
 
     def get_idempotency_hash(self):
         data = self.normalize_idempotency_data(self.request.data)
-        payload = json.dumps(data, sort_keys=True, separators=(',', ':'), default=str)
-        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+        payload = json.dumps(data, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def normalize_idempotency_data(self, value):
         if isinstance(value, dict):
@@ -140,8 +132,7 @@ class IdempotentCreateMixin:
         return value
 
     def get_existing_idempotent_object(self, idempotency_key):
-        lookup = {self.idempotency_key_field: idempotency_key}
-        return self.get_queryset().filter(**lookup).first()
+        return self.get_queryset().filter(**{self.idempotency_key_field: idempotency_key}).first()
 
     def get_idempotency_save_kwargs(self):
-        return getattr(self, '_idempotency_values', None) or {}
+        return getattr(self, "_idempotency_values", None) or {}

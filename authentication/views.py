@@ -11,8 +11,8 @@ from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, Ou
 from rest_framework_simplejwt.tokens import RefreshToken
 from .serializers import UserSerializer, ChangePasswordSerializer, UserMembershipSerializer
 from .permissions import UserManagementPermission
-from core.models import UserMembership, Role
-from core.policies import has_role, can_manage_company
+from core.models import UserMembership
+from core.policies import can_manage_company
 from core.request_context import get_current_company
 
 User = get_user_model()
@@ -32,7 +32,7 @@ class LoginView(generics.GenericAPIView):
         user = serializer.user
         
         # FIX: Resolve N+1 query issue for the UserSerializer relations
-        user_with_relations = User.objects.select_related('company', 'branch').prefetch_related('memberships', 'memberships__company', 'memberships__branch').get(pk=user.pk)
+        user_with_relations = User.objects.select_related('company', 'office').prefetch_related('memberships', 'memberships__company', 'memberships__office').get(pk=user.pk)
 
         # Log the login action (triggers Django signals, useful for Audit Trails)
         user_logged_in.send(sender=user_with_relations.__class__, request=request, user=user_with_relations)
@@ -83,7 +83,7 @@ class UserViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.is_superuser or has_role(user, roles=[Role.PLATFORM_ADMIN]):
+        if can_manage_company(user, None):
             return User.objects.all()
         
         company = get_current_company()
@@ -102,7 +102,7 @@ class UserMembershipViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.is_superuser or has_role(user, roles=[Role.PLATFORM_ADMIN]):
+        if can_manage_company(user, None):
             return UserMembership.objects.all()
         
         company = get_current_company()

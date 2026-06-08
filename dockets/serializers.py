@@ -1,7 +1,7 @@
 from decimal import Decimal, ROUND_HALF_UP
 from django.db import transaction
 from rest_framework import serializers
-from core.request_context import get_current_company
+from core.request_context import get_current_branch, get_current_company
 from .models import Docket, DocketLineItem, DocketStatusEvent, DeliveryAssignment, ProofOfDelivery
 from .tasks import send_status_update_notification
 from .services import lookup_rate, get_branch_rate_policy
@@ -57,16 +57,14 @@ class DocketLineItemSerializer(serializers.ModelSerializer):
         pieces = get_val('pieces', 0)
         charged_weight = get_val('charged_weight', Decimal('0.00'))
         rate = get_val('rate', Decimal('0.00'))
-        charge = get_val('charge', Decimal('0.00'))
 
         if rate_type == DocketLineItem.RateTypeChoices.PER_PIECE:
-            expected_charge = (rate * pieces).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-            if charge != expected_charge:
-                raise serializers.ValidationError({"charge": f"Charge must be {expected_charge} (rate * pieces) for PER_PIECE."})
+            data['charge'] = (rate * pieces).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
         elif rate_type == DocketLineItem.RateTypeChoices.PER_KG:
-            expected_charge = (rate * charged_weight).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-            if charge != expected_charge:
-                raise serializers.ValidationError({"charge": f"Charge must be {expected_charge} (rate * charged_weight) for PER_KG."})
+            data['charge'] = (rate * charged_weight).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        elif rate_type == DocketLineItem.RateTypeChoices.FLAT:
+            data['charge'] = rate.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        
         return data
 
 class DocketListSerializer(serializers.ModelSerializer):
@@ -98,6 +96,7 @@ class DocketListSerializer(serializers.ModelSerializer):
         return event.created_at if event else None
 
 class DocketSerializer(serializers.ModelSerializer):
+    date = serializers.DateField(input_formats=['%d/%m/%Y', '%Y-%m-%d'])
     created_by_name = serializers.ReadOnlyField(source='created_by.username')
     updated_by_name = serializers.ReadOnlyField(source='updated_by.username')
     company_name = serializers.ReadOnlyField(source='company.name')
@@ -157,25 +156,13 @@ class DocketSerializer(serializers.ModelSerializer):
             request = self.context.get('request')
             user = getattr(request, 'user', None)
 
-            # If origin_branch is not provided, try to infer it
+            # If origin_branch is not provided, use the selected active branch.
             if 'origin_branch' not in data and user:
-                active_branches = user.memberships.filter(is_active=True).values_list('branch', flat=True)
-                active_branches = [b for b in active_branches if b is not None]
-                
-                if len(active_branches) == 1:
-                    from core.models import Branch
-                    branch = Branch.objects.get(pk=active_branches[0])
-                    data['origin_branch'] = branch.pk
+                branch = get_current_branch()
+                if branch:
+                    data['origin_branch'] = branch.id
                     if branch.city_id:
                         data['from_city'] = branch.city_id
-                elif len(active_branches) > 1:
-                    raise serializers.ValidationError({
-                        "origin_branch": "You belong to multiple branches. Please specify an origin_branch."
-                    })
-                else:
-                    # User has no active branch memberships, but might be a platform/client admin
-                    # Let field-level validation handle it if origin_branch is missing
-                    pass
             
             # If from_city is not provided but origin_branch is, infer it
             if 'from_city' not in data and 'origin_branch' in data:
@@ -208,6 +195,9 @@ class DocketSerializer(serializers.ModelSerializer):
         user = request.user
         origin_branch = data.get('origin_branch')
         dest_branch = data.get('destination_branch')
+
+        if not company:
+            raise serializers.ValidationError({"company": "Active company context required."})
 
         # Resolve fields for validation against instance for partial updates
         resolved_origin_branch = origin_branch or getattr(self.instance, 'origin_branch', None)
@@ -248,6 +238,11 @@ class DocketSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"destination_branch": "This branch does not belong to your company."})
             if not dest_branch.is_active:
                 raise serializers.ValidationError({"destination_branch": "Destination branch is not active."})
+
+        if resolved_origin_branch and resolved_origin_branch.company != company:
+            raise serializers.ValidationError({"origin_branch": "This branch does not belong to your company."})
+        if resolved_dest_branch and resolved_dest_branch.company != company:
+            raise serializers.ValidationError({"destination_branch": "This branch does not belong to your company."})
 
         # Branch Authorization Check
         from core.policies import has_role, can_create_docket, can_edit_docket
@@ -438,31 +433,10 @@ class DocketSerializer(serializers.ModelSerializer):
         
         # Recalculate for advance validation if either charges or advance changed
         if line_items_data is not None:
-            request = self.context.get('request')
-            is_put_request = request.method == 'PUT' if request else False
-            item_mapping = {item.id: item for item in instance.line_items.all()}
-            data_mapping = {item.get('id'): item for item in line_items_data if item.get('id')}
-            
-            # Pre-calculate new freight to satisfy DB constraints during initial save
-            new_freight = Decimal('0.00')
-            if is_put_request:
-                new_freight = sum(item.get('charge', Decimal('0.00')) for item in line_items_data)
-            else:
-                # For PATCH, combine existing items with updates
-                seen_ids = set()
-                for item_id, item in item_mapping.items():
-                    if item_id in data_mapping:
-                        new_freight += data_mapping[item_id].get('charge', item.charge)
-                        seen_ids.add(item_id)
-                    else:
-                        new_freight += item.charge
-                # Add entirely new items
-                for item_data in line_items_data:
-                    if item_data.get('id') not in seen_ids:
-                        new_freight += item_data.get('charge', Decimal('0.00'))
-            
+            # When line_items are provided, we treat it as a full replacement of the list
+            # regardless of whether it's PUT or PATCH. This is more intuitive for Dockets.
+            new_freight = sum(item.get('charge', Decimal('0.00')) for item in line_items_data)
             instance.freight = new_freight
-            # We'll update other totals (weight, etc.) later as they don't have LTE constraints with advance
 
         final_freight = instance.freight + instance.additional_charges + instance.delivery_charge
         if instance.advance_amount > final_freight:
@@ -477,11 +451,10 @@ class DocketSerializer(serializers.ModelSerializer):
             item_mapping = {item.id: item for item in instance.line_items.all()}
             data_mapping = {item.get('id'): item for item in line_items_data if item.get('id')}
 
-            # 1. Delete items not in data_mapping ONLY if it's a PUT request
-            if is_put_request:
-                for item_id, item in item_mapping.items():
-                    if item_id not in data_mapping:
-                        item.delete()
+            # 1. Delete items not in data_mapping (Full replacement)
+            for item_id, item in item_mapping.items():
+                if item_id not in data_mapping:
+                    item.delete()
 
             # 2. Update existing items and create new ones
             updated_by = validated_data.get('updated_by')

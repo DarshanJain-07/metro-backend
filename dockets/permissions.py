@@ -1,5 +1,13 @@
 from rest_framework import permissions
-from core.policies import has_role, can_manage_company, can_create_docket, can_edit_docket
+from core.policies import (
+    can_assign_delivery,
+    can_book_docket,
+    can_edit_docket,
+    can_manage_company,
+    can_mark_delivered,
+    can_receive_incoming_load,
+    has_role,
+)
 from core.models import Role
 from core.request_context import get_current_company
 
@@ -54,24 +62,16 @@ class StrictActionPermission(permissions.BasePermission):
             
         # Workflow Actions
         if action in ['book', 'cancel', 'mark_in_transit']:
-            # Typically origin branch tasks
-            return has_role(request.user, company=obj.company, branch=obj.origin_branch, roles=[Role.BRANCH_ADMIN, Role.BOOKING_USER]) or \
-                   has_role(request.user, company=obj.company, roles=[Role.CLIENT_SUPER_ADMIN])
+            return can_book_docket(request.user, obj)
         
         if action == 'receive':
-            # Destination branch task
-            return has_role(request.user, company=obj.company, branch=obj.destination_branch, roles=[Role.BRANCH_ADMIN, Role.BOOKING_USER]) or \
-                   has_role(request.user, company=obj.company, roles=[Role.CLIENT_SUPER_ADMIN])
+            return can_receive_incoming_load(request.user, obj)
 
-        if action in ['assign_delivery', 'mark_delivered']:
-            # Destination branch task, delivery user can mark delivered
-            if action == 'mark_delivered' and has_role(request.user, company=obj.company, roles=[Role.DELIVERY_USER]):
-                 # Delivery user can only mark delivered if they are assigned? 
-                 # For now, let's allow if they have the role and belong to the branch
-                 return has_role(request.user, company=obj.company, branch=obj.destination_branch, roles=[Role.DELIVERY_USER, Role.BRANCH_ADMIN])
-            
-            return has_role(request.user, company=obj.company, branch=obj.destination_branch, roles=[Role.BRANCH_ADMIN]) or \
-                   has_role(request.user, company=obj.company, roles=[Role.CLIENT_SUPER_ADMIN])
+        if action == 'assign_delivery':
+            return can_assign_delivery(request.user, obj)
+
+        if action == 'mark_delivered':
+            return can_mark_delivered(request.user, obj)
             
         return False
 

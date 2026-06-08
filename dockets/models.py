@@ -79,7 +79,7 @@ class Docket(AuditBaseModel):
         max_length=10, 
         validators=[RegexValidator(r'^\d{10}$', _('Phone number must be exactly 10 digits.'))]
     )
-    consignor_address = models.TextField()
+    consignor_address = models.TextField(blank=True, null=True)
 
     # Consignee Information
     consignee_name = models.CharField(max_length=100)
@@ -88,10 +88,10 @@ class Docket(AuditBaseModel):
         max_length=10, 
         validators=[RegexValidator(r'^\d{10}$', _('Phone number must be exactly 10 digits.'))]
     )
-    consignee_address = models.TextField()
+    consignee_address = models.TextField(blank=True, null=True)
 
     # Billing and Notes
-    gst_party = models.CharField(max_length=100)
+    gst_party = models.CharField(max_length=100, blank=True, null=True)
     gst_number = models.CharField(
         max_length=15, 
         blank=True, 

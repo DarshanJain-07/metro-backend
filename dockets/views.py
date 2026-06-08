@@ -1,8 +1,10 @@
+from decimal import Decimal, ROUND_HALF_UP
 from rest_framework import viewsets, status
+from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.core.exceptions import ValidationError as DjangoValidationError
-from .models import Docket, RateCard, RateRule, BranchRatePolicy, DeliveryAssignment
+from .models import Docket, RateCard, RateRule, BranchRatePolicy, DeliveryAssignment, DocketLineItem
 from .serializers import (
     DocketListSerializer, DocketSerializer, 
     ProofOfDeliverySerializer, DeliveryAssignmentSerializer
@@ -48,7 +50,10 @@ class DocketViewSet(
     """
     queryset = Docket.objects.none()
     serializer_class = DocketSerializer
-    filter_backends = [DjangoFilterBackend]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    search_fields = ["docket_no", "consignor_name", "consignee_name", "consignor_city__name", "consignee_city__name"]
+    ordering_fields = "__all__"
+    ordering = ["-created_at"]
     filterset_class = DocketFilter
     permission_classes = [StrictActionPermission]
     branch_scope_permission = 'dockets.view_all_branches'
@@ -75,13 +80,105 @@ class DocketViewSet(
         user = self.request.user
         date = serializer.validated_data.get('date')
         
-        # Pass the current company to the generator (still needed for prefixing)
-        company = get_current_company(user)
+        company = get_current_company()
+        if not company:
+            from rest_framework import serializers
+            raise serializers.ValidationError({"company": "Active company context required."})
 
         docket_no = generate_docket_no(date, company)
         
         # Pass company explicitly since middleware might not run in tests
         serializer.save(company=company, docket_no=docket_no, **self.get_idempotency_save_kwargs())
+
+    @action(detail=False, methods=['get'], url_path='suggested-rate')
+    def suggested_rate(self, request):
+        """
+        Lookup the suggested rate based on origin, destination, and basis.
+        """
+        origin_branch_id = request.query_params.get('origin_branch')
+        dest_branch_id = request.query_params.get('destination_branch')
+        basis = request.query_params.get('basis')
+
+        if not origin_branch_id or not dest_branch_id:
+            return Response(
+                {"detail": "origin_branch and destination_branch are required."}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        from core.models import Branch
+        try:
+            origin_branch = Branch.objects.get(pk=origin_branch_id)
+            dest_branch = Branch.objects.get(pk=dest_branch_id)
+        except Branch.DoesNotExist:
+            return Response({"detail": "Branch not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        company = get_current_company()
+        rule = lookup_rate(company, origin_branch, dest_branch, basis)
+
+        if not rule:
+            return Response({"rate": None, "detail": "No rate rule found for this route."})
+
+        return Response({
+            "rate": float(rule.rate),
+            "rate_type": rule.rate_type,
+            "min_charge": float(rule.min_charge),
+            "delivery_charge": float(rule.delivery_charge),
+            "rule_id": rule.id
+        })
+
+    @action(detail=False, methods=['post'])
+    def preview(self, request):
+        """
+        Calculate charges and totals without saving anything.
+        """
+        data = request.data
+        line_items = data.get('line_items', [])
+        additional_charges = Decimal(str(data.get('additional_charges', 0)))
+        delivery_charge = Decimal(str(data.get('delivery_charge', 0)))
+        advance_amount = Decimal(str(data.get('advance_amount', 0)))
+
+        calculated_line_items = []
+        total_freight = Decimal('0.00')
+        total_pieces = 0
+        total_actual_weight = Decimal('0.00')
+        total_charged_weight = Decimal('0.00')
+
+        for item in line_items:
+            rate_type = item.get('rate_type', DocketLineItem.RateTypeChoices.PER_KG)
+            pieces = int(item.get('pieces', 0))
+            actual_weight = Decimal(str(item.get('actual_weight', 0)))
+            charged_weight = Decimal(str(item.get('charged_weight', 0)))
+            rate = Decimal(str(item.get('rate', 0)))
+            
+            charge = Decimal('0.00')
+            if rate_type == DocketLineItem.RateTypeChoices.PER_PIECE:
+                charge = (rate * pieces).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            elif rate_type == DocketLineItem.RateTypeChoices.PER_KG:
+                charge = (rate * charged_weight).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            elif rate_type == DocketLineItem.RateTypeChoices.FLAT:
+                charge = rate.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+            
+            calculated_line_items.append({
+                'id': item.get('id'),
+                'charge': float(charge)
+            })
+            total_freight += charge
+            total_pieces += pieces
+            total_actual_weight += actual_weight
+            total_charged_weight += charged_weight
+
+        final_freight = total_freight + additional_charges + delivery_charge
+        balance = final_freight - advance_amount
+
+        return Response({
+            'line_items': calculated_line_items,
+            'freight': float(total_freight),
+            'total_packages': total_pieces,
+            'total_actual_weight': float(total_actual_weight),
+            'total_charge_weight': float(total_charged_weight),
+            'final_freight': float(final_freight),
+            'remaining_balance': float(balance)
+        })
 
     @action(detail=True, methods=['post'])
     def book(self, request, pk=None):
@@ -156,15 +253,7 @@ class DocketViewSet(
         List dockets destined for the user's active branch.
         """
         user = request.user
-        # Get active branch from context or membership
-        branch = get_current_branch(user)
-        
-        if not branch:
-             # Try to infer if only one active branch
-             active_branches = user.memberships.filter(is_active=True).values_list('branch', flat=True)
-             if len(active_branches) == 1:
-                 from core.models import Branch
-                 branch = Branch.objects.get(pk=active_branches[0])
+        branch = get_current_branch()
 
         qs = self.get_queryset()
         
@@ -176,7 +265,7 @@ class DocketViewSet(
             if branch:
                 qs = qs.filter(destination_branch=branch)
             else:
-                return Response({"detail": "Active branch not found for user."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"detail": "Active branch context required."}, status=status.HTTP_400_BAD_REQUEST)
         
         # Apply filters from DocketFilter
         filtered_qs = self.filter_queryset(qs)
@@ -188,4 +277,3 @@ class DocketViewSet(
 
         serializer = DocketListSerializer(filtered_qs, many=True)
         return Response(serializer.data)
-

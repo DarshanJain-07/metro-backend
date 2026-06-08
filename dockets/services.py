@@ -3,6 +3,14 @@ from django.db import transaction, models
 from django.utils import timezone
 from django.core.exceptions import ValidationError
 from core.request_context import get_current_branch
+from core.policies import (
+    can_assign_delivery,
+    can_book_docket,
+    can_mark_delivered,
+    can_receive_incoming_load,
+    has_role,
+)
+from core.models import Role
 from .models import (
     Docket, DocketStatusEvent, DeliveryAssignment, 
     ProofOfDelivery, RateCard, RateRule, BranchRatePolicy
@@ -91,19 +99,24 @@ def lookup_rate(company, origin_branch, destination_branch, basis):
 class DocketWorkflowService:
     @staticmethod
     @transaction.atomic
-    def record_status_event(docket, from_status, to_status, user, notes=None):
+    def record_status_event(docket, from_status, to_status, user, notes=None, branch=None):
+        branch = branch or get_current_branch()
+        if branch is None:
+            raise ValidationError("Active branch context required for status events.")
         return DocketStatusEvent.objects.create(
             docket=docket,
             from_status=from_status,
             to_status=to_status,
             changed_by=user,
-            branch=get_current_branch(user),
+            branch=branch,
             notes=notes
         )
 
     @staticmethod
     @transaction.atomic
     def book_docket(docket, user):
+        if not can_book_docket(user, docket):
+            raise ValidationError("You do not have permission to book this docket.")
         if docket.status != Docket.StatusChoices.DRAFT:
             raise ValidationError(f"Cannot book docket in {docket.status} status.")
         
@@ -111,12 +124,14 @@ class DocketWorkflowService:
         docket.status = Docket.StatusChoices.BOOKED
         docket.save(update_fields=['status', 'updated_at', 'updated_by'])
         
-        DocketWorkflowService.record_status_event(docket, old_status, docket.status, user)
+        DocketWorkflowService.record_status_event(docket, old_status, docket.status, user, branch=docket.origin_branch)
         return docket
 
     @staticmethod
     @transaction.atomic
     def mark_in_transit(docket, user):
+        if not can_book_docket(user, docket):
+            raise ValidationError("You do not have permission to mark this docket in transit.")
         if docket.status != Docket.StatusChoices.BOOKED:
             raise ValidationError(f"Cannot mark in-transit from {docket.status} status.")
         
@@ -124,30 +139,38 @@ class DocketWorkflowService:
         docket.status = Docket.StatusChoices.IN_TRANSIT
         docket.save(update_fields=['status', 'updated_at', 'updated_by'])
         
-        DocketWorkflowService.record_status_event(docket, old_status, docket.status, user)
+        DocketWorkflowService.record_status_event(docket, old_status, docket.status, user, branch=docket.origin_branch)
         return docket
 
     @staticmethod
     @transaction.atomic
     def receive_docket(docket, user):
+        if not can_receive_incoming_load(user, docket):
+            raise ValidationError("You do not have permission to receive this docket.")
         # Can receive from IN_TRANSIT
         if docket.status != Docket.StatusChoices.IN_TRANSIT:
             raise ValidationError(f"Cannot receive docket from {docket.status} status.")
         
         # Verify user branch is destination branch
-        if get_current_branch(user) != docket.destination_branch:
+        if get_current_branch() != docket.destination_branch:
              raise ValidationError("Only destination branch can receive this docket.")
 
         old_status = docket.status
         docket.status = Docket.StatusChoices.INCOMING
         docket.save(update_fields=['status', 'updated_at', 'updated_by'])
         
-        DocketWorkflowService.record_status_event(docket, old_status, docket.status, user)
+        DocketWorkflowService.record_status_event(docket, old_status, docket.status, user, branch=docket.destination_branch)
         return docket
 
     @staticmethod
     @transaction.atomic
     def assign_delivery(docket, delivery_user, assigned_by):
+        if not can_assign_delivery(assigned_by, docket):
+            raise ValidationError("You do not have permission to assign delivery for this docket.")
+
+        if not has_role(delivery_user, company=docket.company, branch=docket.destination_branch, roles=[Role.DELIVERY_USER]):
+            raise ValidationError("Delivery user must have an active delivery membership for the destination branch.")
+
         if docket.status not in [Docket.StatusChoices.INCOMING, Docket.StatusChoices.BOOKED]:
              # Allow assignment from BOOKED if it's direct delivery? 
              # Requirement says DRAFT -> BOOKED -> IN_TRANSIT -> INCOMING -> DELIVERED
@@ -174,6 +197,9 @@ class DocketWorkflowService:
     @staticmethod
     @transaction.atomic
     def mark_delivered(docket, pod_data, user):
+        if not can_mark_delivered(user, docket):
+            raise ValidationError("You do not have permission to deliver this docket.")
+
         if docket.status != Docket.StatusChoices.INCOMING:
             # Maybe it can be delivered directly if it's same branch?
             # Requirement: DRAFT -> BOOKED -> IN_TRANSIT -> INCOMING -> DELIVERED
@@ -204,12 +230,15 @@ class DocketWorkflowService:
             updated_by=user
         )
 
-        DocketWorkflowService.record_status_event(docket, old_status, docket.status, user)
+        DocketWorkflowService.record_status_event(docket, old_status, docket.status, user, branch=docket.destination_branch)
         return docket
 
     @staticmethod
     @transaction.atomic
     def cancel_docket(docket, user, notes=None):
+        if not can_book_docket(user, docket):
+            raise ValidationError("You do not have permission to cancel this docket.")
+
         if docket.status not in [Docket.StatusChoices.DRAFT, Docket.StatusChoices.BOOKED]:
             raise ValidationError(f"Cannot cancel docket in {docket.status} status.")
 
@@ -217,5 +246,5 @@ class DocketWorkflowService:
         docket.status = Docket.StatusChoices.CANCELLED
         docket.save(update_fields=['status', 'updated_at', 'updated_by'])
         
-        DocketWorkflowService.record_status_event(docket, old_status, docket.status, user, notes=notes)
+        DocketWorkflowService.record_status_event(docket, old_status, docket.status, user, notes=notes, branch=docket.origin_branch)
         return docket

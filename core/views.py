@@ -16,7 +16,7 @@ from .viewsets import (
 )
 
 
-from core.policies import has_role, can_manage_company
+from core.policies import active_branch_ids, has_role, can_manage_company
 from core.models import Role
 from core.request_context import get_current_company, get_current_branch
 
@@ -34,7 +34,7 @@ def company_scoped_queryset(queryset, user):
     qs = queryset.filter(company=company)
     
     if not has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN]):
-        active_branches = list(user.memberships.filter(is_active=True).values_list('branch', flat=True))
+        active_branches = active_branch_ids(user, company)
         if hasattr(queryset.model, 'branch'):
             qs = qs.filter(models.Q(branch__in=active_branches) | models.Q(branch__isnull=True))
     return qs
@@ -65,7 +65,7 @@ class ActionModelPermission(BasePermission):
         if not config.get('company_scoped'):
             return False 
 
-        company = get_current_company() or getattr(request.user, 'company', None)
+        company = get_current_company()
         if company and can_manage_company(request.user, company):
             return True
 
@@ -97,7 +97,7 @@ class DashboardStatsView(APIView):
             invoices = invoices.filter(branch_id=branch_id)
             payments = payments.filter(branch_id=branch_id)
         elif not has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN, Role.PLATFORM_ADMIN]):
-            active_branches = list(user.memberships.filter(is_active=True).values_list('branch', flat=True))
+            active_branches = active_branch_ids(user, company)
             dockets = dockets.filter(models.Q(origin_branch_id__in=active_branches) | models.Q(destination_branch_id__in=active_branches))
             invoices = invoices.filter(branch_id__in=active_branches)
             payments = payments.filter(branch_id__in=active_branches)
@@ -202,10 +202,10 @@ class MasterDataViewSet(
         save_kwargs = self.get_idempotency_save_kwargs()
         
         if config['company_scoped']:
-            company = getattr(self.request.user, 'company', None)
+            company = get_current_company()
             if not company:
                 raise serializers.ValidationError({
-                    "detail": "User must be assigned to a company before creating this resource."
+                    "detail": "Active company context required."
                 })
             serializer.save(company=company, **save_kwargs)
         else:

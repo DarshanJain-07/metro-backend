@@ -1,7 +1,7 @@
 import os
 import django
 import random
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 # Setup Django environment
@@ -9,45 +9,64 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'core.settings')
 django.setup()
 
 from django.db import transaction
-from core.models import State, City, Branch, Company, User, Party
-from dockets.models import Docket, DocketLineItem
+from django.utils import timezone
+from core.models import State, City, Branch, Company, User, Party, Role, UserMembership
+from dockets.models import (
+    Docket, DocketLineItem, RateCard, RateRule, 
+    BranchRatePolicy, DocketStatusEvent, DeliveryAssignment, ProofOfDelivery
+)
 from dockets.utils import generate_docket_no
 from core.request_context import set_current_user, set_current_company
 
 def seed():
-    print("Starting database seeding...")
+    print("Starting enhanced database seeding...")
     
     with transaction.atomic():
+        # 0. Cleanup existing data (optional, but recommended for clean init)
+        print("Cleaning up existing data...")
+        ProofOfDelivery.objects.all().delete()
+        DeliveryAssignment.objects.all().delete()
+        DocketStatusEvent.objects.all().delete()
+        DocketLineItem.objects.all().delete()
+        Docket.objects.all().delete()
+        RateRule.objects.all().delete()
+        RateCard.objects.all().delete()
+        BranchRatePolicy.objects.all().delete()
+        UserMembership.objects.all().delete()
+        Party.objects.all().delete()
+        # We'll keep Users, Cities, States, Companies to avoid breaking foreign keys 
+        # but you could clear them too if needed. 
+        # For now, let's keep it surgical.
+
         # 1. Get or create Company
         company, created = Company.objects.get_or_create(name="Metro Logistics Corp")
         if created:
             print(f"Created company: {company.name}")
         
-        # 2. Get or create Admin User
-        admin_user = User.objects.filter(is_superuser=True).first()
+        # 2. Users
+        # Admin User
+        admin_user = User.objects.filter(username='admin').first()
         if not admin_user:
             admin_user = User.objects.create_superuser('admin', 'admin@example.com', 'admin')
             admin_user.company = company
             admin_user.save()
             print("Created superuser 'admin' with password 'admin'")
         else:
-            if not admin_user.company:
-                admin_user.company = company
-                admin_user.save()
-            print(f"Using existing superuser: {admin_user.username}")
+            admin_user.company = company
+            admin_user.save()
 
-        # Create/Update 'metro' superuser
+        # Metro User (Client Super Admin)
         metro_user = User.objects.filter(username='metro').first()
         if not metro_user:
-            metro_user = User.objects.create_superuser('metro', 'metro@example.com', '123')
+            metro_user = User.objects.create_user('metro', 'metro@example.com', '123')
             metro_user.company = company
+            metro_user.is_staff = True
             metro_user.save()
-            print("Created superuser 'metro' with password '123'")
+            print("Created user 'metro' with password '123'")
         else:
             metro_user.set_password('123')
             metro_user.company = company
             metro_user.save()
-            print("Updated superuser 'metro' password to '123'")
 
         # Set context for AuditBaseModel
         set_current_user(admin_user)
@@ -75,23 +94,70 @@ def seed():
         print(f"Ensured {State.objects.count()} states and {City.objects.count()} cities.")
 
         # 4. Branches
-        # Create a branch for each state's primary city if it doesn't exist
-        for city in all_cities:
-            # For testing, let's just create branches in major cities
-            if city.name in ["Mumbai", "Pune", "Ahmedabad", "Bangalore", "New Delhi", "Kolkata", "Hyderabad", "Chennai"]:
-                branch, created = Branch.objects.get_or_create(
-                    company=company,
-                    name=f"{city.name} Branch",
-                    defaults={'city': city}
-                )
-                if created:
-                    # print(f"Created branch: {branch.name}")
-                    pass
+        major_cities = ["Mumbai", "Pune", "Ahmedabad", "Bangalore", "New Delhi", "Kolkata", "Hyderabad", "Chennai"]
+        all_branches = []
+        for city_name in major_cities:
+            city = City.objects.get(name=city_name)
+            branch, created = Branch.objects.get_or_create(
+                company=company,
+                name=f"{city.name} Branch",
+                defaults={'city': city}
+            )
+            all_branches.append(branch)
+            
+            # Create Branch Rate Policy
+            BranchRatePolicy.objects.get_or_create(
+                company=company,
+                branch=branch,
+                defaults={
+                    'can_override_rate': True,
+                    'max_discount_percent': Decimal('10.00'),
+                    'requires_approval': False
+                }
+            )
         
-        all_branches = list(Branch.objects.filter(company=company))
-        print(f"Ensured {len(all_branches)} branches.")
+        print(f"Ensured {len(all_branches)} branches with rate policies.")
 
-        # 5. Parties
+        # 5. Memberships for 'metro' user
+        # Give 'metro' user Client Super Admin role for the company
+        UserMembership.objects.get_or_create(
+            user=metro_user,
+            company=company,
+            role=Role.CLIENT_SUPER_ADMIN,
+            branch=None
+        )
+        
+        # Also assign 'metro' to Mumbai Branch as Branch Admin for testing branch scoping
+        mumbai_branch = Branch.objects.get(name="Mumbai Branch")
+        UserMembership.objects.get_or_create(
+            user=metro_user,
+            company=company,
+            role=Role.BRANCH_ADMIN,
+            branch=mumbai_branch
+        )
+        
+        # Create some other functional users
+        users_to_create = [
+            ('pune_mgr', Role.BRANCH_ADMIN, "Pune Branch"),
+            ('blr_booking', Role.BOOKING_USER, "Bangalore Branch"),
+            ('del_delivery', Role.DELIVERY_USER, "New Delhi Branch"),
+        ]
+        
+        for username, role, branch_name in users_to_create:
+            u, _ = User.objects.get_or_create(username=username, defaults={'email': f'{username}@example.com'})
+            u.set_password('password123')
+            u.company = company
+            u.save()
+            
+            branch = Branch.objects.get(name=branch_name)
+            UserMembership.objects.get_or_create(
+                user=u,
+                company=company,
+                role=role,
+                branch=branch
+            )
+
+        # 6. Parties
         party_names = [
             "Reliance Industries", "Tata Motors", "Infosys Ltd", "Wipro", "HDFC Bank",
             "Adani Enterprises", "Mahindra & Mahindra", "Sun Pharma", "ICICI Bank", "L&T",
@@ -117,8 +183,35 @@ def seed():
         
         print(f"Ensured {len(all_parties)} parties.")
 
-        # 6. Dockets
-        print("Creating 100 dockets...")
+        # 7. Rate Cards and Rules
+        rate_card, _ = RateCard.objects.get_or_create(
+            company=company,
+            name="Standard Rate Card 2024",
+            defaults={
+                'is_default': True,
+                'effective_from': timezone.now() - timedelta(days=365)
+            }
+        )
+        
+        # Create some rules between major cities
+        for origin in all_branches:
+            for destination in all_branches:
+                if origin == destination: continue
+                RateRule.objects.get_or_create(
+                    rate_card=rate_card,
+                    origin_city=origin.city,
+                    destination_city=destination.city,
+                    defaults={
+                        'basis': Docket.BasisChoices.WEIGHT,
+                        'rate_type': DocketLineItem.RateTypeChoices.PER_KG,
+                        'rate': Decimal(str(random.randint(5, 15))),
+                        'min_charge': Decimal('100.00'),
+                        'delivery_charge': Decimal('50.00')
+                    }
+                )
+
+        # 8. Dockets
+        print("Creating 150 dockets with history...")
         statuses = [choice[0] for choice in Docket.StatusChoices.choices]
         bases = [choice[0] for choice in Docket.BasisChoices.choices]
         payment_types = [choice[0] for choice in Docket.PaymentTypeChoices.choices]
@@ -129,11 +222,10 @@ def seed():
         package_types = [choice[0] for choice in DocketLineItem.PackageTypeChoices.choices]
         rate_types = [choice[0] for choice in DocketLineItem.RateTypeChoices.choices]
 
-        # Use a fixed range of dates for better testing
         today = date.today()
         
-        for i in range(100):
-            docket_date = today - timedelta(days=random.randint(0, 30))
+        for i in range(150):
+            docket_date = today - timedelta(days=random.randint(0, 45))
             origin_branch = random.choice(all_branches)
             dest_branch = random.choice(all_branches)
             while dest_branch == origin_branch:
@@ -145,9 +237,14 @@ def seed():
                 consignee = random.choice(all_parties)
             
             status = random.choice(statuses)
-            # If date is older, more likely to be delivered
-            if (today - docket_date).days > 15 and random.random() > 0.2:
-                status = Docket.StatusChoices.DELIVERED
+            # Logical status progression based on age
+            age_days = (today - docket_date).days
+            if age_days > 20:
+                status = random.choice([Docket.StatusChoices.DELIVERED, Docket.StatusChoices.CANCELLED, Docket.StatusChoices.DELIVERED])
+            elif age_days > 10:
+                status = random.choice([Docket.StatusChoices.IN_TRANSIT, Docket.StatusChoices.INCOMING, Docket.StatusChoices.DELIVERED])
+            elif age_days > 5:
+                status = random.choice([Docket.StatusChoices.BOOKED, Docket.StatusChoices.IN_TRANSIT])
             
             docket = Docket(
                 company=company,
@@ -171,32 +268,30 @@ def seed():
                 consignee_address=consignee.address,
                 gst_party=consignor.name if random.random() > 0.5 else consignee.name,
                 gst_number=consignor.gst_number if random.random() > 0.5 else consignee.gst_number,
-                notes="Seeded test docket",
+                notes=f"Seeded test docket {i}",
                 created_by=admin_user,
                 updated_by=admin_user,
-                # Temporary values to satisfy non-null/check constraints
                 total_actual_weight=Decimal('0.00'),
                 total_charge_weight=Decimal('0.00'),
             )
             
-            # Generate docket number
             docket.docket_no = generate_docket_no(docket_date, company)
             docket.save()
             
             # Create line items
-            num_items = random.randint(1, 3)
+            num_items = random.randint(1, 4)
             total_freight = Decimal('0.00')
             total_pkgs = 0
             total_act_w = Decimal('0.00')
             total_chg_w = Decimal('0.00')
             
             for _ in range(num_items):
-                pieces = random.randint(1, 50)
-                act_w = Decimal(str(round(random.uniform(5.0, 500.0), 2)))
-                chg_w = act_w + Decimal(str(round(random.uniform(0.0, 50.0), 2)))
+                pieces = random.randint(1, 100)
+                act_w = Decimal(str(round(random.uniform(1.0, 1000.0), 2)))
+                chg_w = act_w * Decimal('1.1') # Simulating volumetric
                 
                 rate_type = random.choice(rate_types)
-                rate = Decimal(str(round(random.uniform(2.0, 20.0), 2)))
+                rate = Decimal(str(round(random.uniform(2.0, 50.0), 2)))
                 
                 if rate_type == DocketLineItem.RateTypeChoices.PER_KG:
                     charge = (rate * chg_w).quantize(Decimal('0.01'))
@@ -224,29 +319,74 @@ def seed():
                 total_act_w += act_w
                 total_chg_w += chg_w
             
-            # Update totals on docket
             docket.freight = total_freight
             docket.total_packages = total_pkgs
             docket.total_actual_weight = total_act_w
             docket.total_charge_weight = total_chg_w
             
-            # Add some charges
-            if random.random() > 0.7:
-                docket.additional_charges = Decimal(str(random.randint(50, 500)))
-            if random.random() > 0.7:
-                docket.delivery_charge = Decimal(str(random.randint(100, 1000)))
+            if random.random() > 0.5:
+                docket.additional_charges = Decimal(str(random.randint(20, 200)))
+            if random.random() > 0.5:
+                docket.delivery_charge = Decimal(str(random.randint(50, 500)))
             
-            # Add advance if PAID
             final_f = docket.freight + docket.additional_charges + docket.delivery_charge
             if docket.payment_type == Docket.PaymentTypeChoices.PAID:
                 docket.advance_amount = final_f
-            elif random.random() > 0.5:
-                # Partial advance
-                docket.advance_amount = (final_f * Decimal('0.3')).quantize(Decimal('0.01'))
+            elif random.random() > 0.3:
+                docket.advance_amount = (final_f * Decimal(str(random.uniform(0.1, 0.5)))).quantize(Decimal('0.01'))
             
             docket.save()
 
-    print("Seeding completed successfully!")
+            # Create some status history
+            DocketStatusEvent.objects.create(
+                docket=docket,
+                from_status=Docket.StatusChoices.DRAFT,
+                to_status=Docket.StatusChoices.BOOKED,
+                changed_by=admin_user,
+                branch=origin_branch,
+                notes="Initial booking"
+            )
+            
+            if docket.status in [Docket.StatusChoices.IN_TRANSIT, Docket.StatusChoices.INCOMING, Docket.StatusChoices.DELIVERED]:
+                DocketStatusEvent.objects.create(
+                    docket=docket,
+                    from_status=Docket.StatusChoices.BOOKED,
+                    to_status=Docket.StatusChoices.IN_TRANSIT,
+                    changed_by=admin_user,
+                    branch=origin_branch,
+                    notes="Dispatched from origin"
+                )
+            
+            if docket.status in [Docket.StatusChoices.INCOMING, Docket.StatusChoices.DELIVERED]:
+                DocketStatusEvent.objects.create(
+                    docket=docket,
+                    from_status=Docket.StatusChoices.IN_TRANSIT,
+                    to_status=Docket.StatusChoices.INCOMING,
+                    changed_by=admin_user,
+                    branch=dest_branch,
+                    notes="Received at destination"
+                )
+
+            # Create Delivery Assignment and POD if DELIVERED
+            if docket.status == Docket.StatusChoices.DELIVERED:
+                delivery_user = User.objects.get(username='del_delivery')
+                assignment = DeliveryAssignment.objects.create(
+                    docket=docket,
+                    delivery_user=delivery_user,
+                    assigned_by=admin_user,
+                    status=DeliveryAssignment.StatusChoices.COMPLETED,
+                    completed_at=timezone.now() - timedelta(hours=random.randint(1, 24))
+                )
+                
+                ProofOfDelivery.objects.create(
+                    docket=docket,
+                    received_by_name=docket.consignee_name,
+                    received_by_phone=docket.consignee_phone,
+                    delivery_notes="Delivered successfully",
+                    delivered_at=assignment.completed_at
+                )
+
+    print("Enhanced seeding completed successfully!")
 
 if __name__ == "__main__":
     seed()

@@ -32,7 +32,7 @@ class TenantBranchScopedQuerysetMixin:
         if not user or not user.is_authenticated:
             return qs.none()
 
-        from core.policies import has_role
+        from core.policies import active_branch_ids, has_role
         from core.models import Role
         from core.request_context import get_current_company
 
@@ -46,10 +46,7 @@ class TenantBranchScopedQuerysetMixin:
         if self.branch_scope_permission and user.has_perm(self.branch_scope_permission):
             return qs
 
-        active_branches = list(user.memberships.filter(
-            company=company, 
-            is_active=True
-        ).values_list('branch', flat=True))
+        active_branches = active_branch_ids(user, company)
         if not active_branches:
             return qs.none()
 

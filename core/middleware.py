@@ -1,5 +1,6 @@
 import uuid
 import logging
+from django.http import JsonResponse
 from core.request_context import (
     get_request_id,
     reset_current_branch,
@@ -42,9 +43,15 @@ class RequestContextMiddleware:
 
     def __call__(self, request):
         token = set_current_request(request)
+        token_company = set_current_company(None)
+        token_branch = set_current_branch(None)
+        token_role = set_current_role(None)
         try:
             return self.get_response(request)
         finally:
+            reset_current_role(token_role)
+            reset_current_branch(token_branch)
+            reset_current_company(token_company)
             reset_current_request(token)
 
 
@@ -98,42 +105,92 @@ class TenantMiddleware:
         if not (user and user.is_authenticated):
             return self.get_response(request)
 
-        # 1. Try to get branch/company from headers
+        if getattr(user, 'is_superuser', False):
+            return self._with_context(request, None, None, None)
+
         branch_id = request.headers.get('X-Branch-ID')
         company_id = request.headers.get('X-Company-ID')
 
-        from core.models import UserMembership
-        active_membership = None
-        
-        # Only check memberships if user doesn't have a direct company or if headers are provided
-        # or if we want to support membership-only users.
-        qs = UserMembership.unscoped_objects.filter(user=user, is_active=True).select_related('company', 'branch')
-        
-        if branch_id:
-            active_membership = qs.filter(branch_id=branch_id).first()
-        elif company_id:
-            active_membership = qs.filter(company_id=company_id).first()
-            
-        if not active_membership:
-            # Fallback: if user has a direct company, that's their default
-            if getattr(user, 'company', None):
-                request.current_company = user.company
-                request.current_branch = user.branch
-                request.current_role = None 
-            else:
-                # Fallback to first active membership
-                active_membership = qs.first()
-                
-        if active_membership:
-            request.current_company = active_membership.company
-            request.current_branch = active_membership.branch
-            request.current_role = active_membership.role
+        from core.models import Role, UserMembership
 
-        # Set context variables for the duration of the request
+        memberships = list(UserMembership.unscoped_objects.filter(
+            user=user,
+            is_active=True,
+        ).select_related('company', 'branch'))
+
+        if not memberships:
+            return JsonResponse(
+                {"detail": "Active company/branch context required."},
+                status=400,
+            )
+
+        branch_roles = {
+            Role.BRANCH_ADMIN,
+            Role.BOOKING_USER,
+            Role.DELIVERY_USER,
+            Role.ACCOUNTANT,
+            Role.VIEWER,
+        }
+
+        candidates = memberships
+        if company_id:
+            candidates = [membership for membership in candidates if str(membership.company_id) == str(company_id)]
+            if not candidates:
+                return JsonResponse({"detail": "Invalid active company context."}, status=400)
+
+        if branch_id:
+            candidates = [membership for membership in candidates if str(membership.branch_id) == str(branch_id)]
+            if not candidates:
+                return JsonResponse({"detail": "Invalid active branch context."}, status=400)
+            if company_id and any(str(membership.company_id) != str(company_id) for membership in candidates):
+                return JsonResponse({"detail": "Invalid active company/branch context."}, status=400)
+
+        if not company_id and not branch_id and len(memberships) > 1:
+            return JsonResponse(
+                {"detail": "Active company/branch context required."},
+                status=400,
+            )
+
+        if len(candidates) > 1:
+            company_level = [membership for membership in candidates if membership.branch_id is None]
+            branch_level = [membership for membership in candidates if membership.branch_id is not None]
+
+            if branch_id and branch_level:
+                candidates = branch_level
+            elif len(company_level) == 1 and not branch_level:
+                candidates = company_level
+            elif company_id and len(branch_level) == 1:
+                candidates = branch_level
+            else:
+                return JsonResponse(
+                    {"detail": "Active company/branch context required."},
+                    status=400,
+                )
+
+        active_membership = candidates[0]
+
+        if active_membership.role in branch_roles and active_membership.branch_id is None:
+            return JsonResponse(
+                {"detail": "Active branch context required for this role."},
+                status=400,
+            )
+
+        return self._with_context(
+            request,
+            active_membership.company,
+            active_membership.branch,
+            active_membership.role,
+        )
+
+    def _with_context(self, request, company, branch, role):
+        request.current_company = company
+        request.current_branch = branch
+        request.current_role = role
+
         token_company = set_current_company(getattr(request, 'current_company', None))
         token_branch = set_current_branch(getattr(request, 'current_branch', None))
         token_role = set_current_role(getattr(request, 'current_role', None))
-        
+
         try:
             return self.get_response(request)
         finally:

@@ -55,9 +55,17 @@ def get_current_company(user=None):
 
     if user is None:
         user = get_current_user()
-        
+
     if user and getattr(user, 'is_authenticated', False):
-        return getattr(user, 'company', None)
+        from core.models import UserMembership
+        company_ids = list(
+            UserMembership.unscoped_objects.filter(user=user, is_active=True)
+            .values_list('company_id', flat=True)
+            .distinct()
+        )
+        if len(company_ids) == 1:
+            from core.models import Company
+            return Company.objects.filter(pk=company_ids[0]).first()
 
     return None
 
@@ -83,18 +91,17 @@ def get_current_branch(user=None):
 
     if user is None:
         user = get_current_user()
-        
+
     if user and getattr(user, 'is_authenticated', False):
-        branch = getattr(user, 'branch', None)
-        if branch:
-            return branch
-        
-        # Fallback for membership-based users
-        membership = getattr(user, 'memberships', None)
-        if membership:
-            active_membership = membership.filter(is_active=True).first()
-            if active_membership:
-                return active_membership.branch
+        from core.models import UserMembership
+        branch_ids = list(
+            UserMembership.unscoped_objects.filter(user=user, is_active=True, branch__isnull=False)
+            .values_list('branch_id', flat=True)
+            .distinct()
+        )
+        if len(branch_ids) == 1:
+            from core.models import Branch
+            return Branch.objects.filter(pk=branch_ids[0]).first()
 
     return None
 

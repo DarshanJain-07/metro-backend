@@ -88,7 +88,7 @@ class UserViewSet(viewsets.ModelViewSet):
         
         company = get_current_company()
         if company:
-            return User.objects.filter(company=company)
+            return User.objects.filter(memberships__company=company, memberships__is_active=True).distinct()
         return User.objects.none()
 
     def perform_create(self, serializer):
@@ -112,4 +112,7 @@ class UserMembershipViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         company = get_current_company()
+        if not serializer.validated_data.get('user'):
+            from rest_framework import serializers as drf_serializers
+            raise drf_serializers.ValidationError({"user": "User is required."})
         serializer.save(company=company)

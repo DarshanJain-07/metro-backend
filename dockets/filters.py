@@ -9,8 +9,8 @@ class DocketFilter(django_filters.FilterSet):
     consignee_name = django_filters.CharFilter(lookup_expr='icontains')
     
     # Date Range Filters
-    from_date = django_filters.DateFilter(field_name="date", lookup_expr='gte')
-    to_date = django_filters.DateFilter(field_name="date", lookup_expr='lte')
+    from_date = django_filters.DateFilter(field_name="date", lookup_expr='gte', input_formats=['%d/%m/%Y', '%Y-%m-%d'])
+    to_date = django_filters.DateFilter(field_name="date", lookup_expr='lte', input_formats=['%d/%m/%Y', '%Y-%m-%d'])
     
     # Exact Branch Filters
     origin_branch = django_filters.NumberFilter(field_name="origin_branch", lookup_expr='exact')
@@ -20,6 +20,8 @@ class DocketFilter(django_filters.FilterSet):
     
     # Single search for either Consignor OR Consignee
     party_name = django_filters.CharFilter(method='filter_by_party_name', label="Search by Party Name (Consignor/Consignee)")
+    
+    status = django_filters.ChoiceFilter(choices=Docket.StatusChoices.choices)
 
     class Meta:
         model = Docket

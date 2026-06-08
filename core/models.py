@@ -49,7 +49,8 @@ class TenantManager(models.Manager):
             from core.models import UserMembership
             active_branches = UserMembership.unscoped_objects.filter(
                 user=user, 
-                company=company, 
+                company=company,
+                branch__isnull=False,
                 is_active=True
             ).values_list('branch', flat=True)
             
@@ -219,7 +220,7 @@ class Party(AuditBaseModel):
         max_length=10, 
         validators=[RegexValidator(r'^\d{10}$', _('Phone number must be exactly 10 digits.'))]
     )
-    address = models.TextField()
+    address = models.TextField(blank=True, null=True)
     city = models.ForeignKey(City, related_name='parties', on_delete=models.PROTECT)
     gst_number = models.CharField(
         max_length=15, 

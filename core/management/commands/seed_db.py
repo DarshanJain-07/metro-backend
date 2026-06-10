@@ -15,10 +15,10 @@ from accounts.models import Invoice, InvoiceLine, LedgerEntry, PaymentReceipt
 User = get_user_model()
 
 class Command(BaseCommand):
-    help = 'Seeds the database with initial data including shipments and accounts'
+    help = 'Seeds the database with expanded initial data for testing'
 
     def handle(self, *args, **options):
-        self.stdout.write('Seeding expanded data...')
+        self.stdout.write('Seeding massive expanded data...')
 
         # 1. Create a Company
         company, created = Company.objects.get_or_create(name='Metro Logistics')
@@ -45,63 +45,109 @@ class Command(BaseCommand):
         set_current_user(admin_user)
 
         # 3. Create States and Cities
+        self.stdout.write('Generating states and cities...')
         states_data = [
             {'name': 'Maharashtra', 'code': 'MH'},
             {'name': 'Karnataka', 'code': 'KA'},
+            {'name': 'Gujarat', 'code': 'GJ'},
+            {'name': 'Tamil Nadu', 'code': 'TN'},
+            {'name': 'Delhi', 'code': 'DL'},
+            {'name': 'Rajasthan', 'code': 'RJ'},
+            {'name': 'Uttar Pradesh', 'code': 'UP'},
+            {'name': 'West Bengal', 'code': 'WB'},
+            {'name': 'Telangana', 'code': 'TS'},
+            {'name': 'Kerala', 'code': 'KL'},
         ]
+        
         states = {}
         for data in states_data:
             state, _ = State.objects.get_or_create(name=data['name'], defaults={'code': data['code']})
             states[data['code']] = state
 
-        cities_data = [
-            {'name': 'Mumbai', 'state': states['MH']},
-            {'name': 'Pune', 'state': states['MH']},
-            {'name': 'Bangalore', 'state': states['KA']},
-        ]
-        cities = {}
-        for data in cities_data:
-            city, _ = City.objects.get_or_create(name=data['name'], state=data['state'])
-            cities[data['name']] = city
+        cities_config = {
+            'MH': ['Mumbai', 'Pune', 'Nagpur', 'Nashik', 'Aurangabad', 'Thane', 'Solapur', 'Amravati', 'Kolhapur', 'Akola'],
+            'KA': ['Bangalore', 'Mysore', 'Hubli', 'Mangalore', 'Belgaum', 'Gulbarga', 'Davanagere', 'Bellary', 'Bijapur', 'Shimoga'],
+            'GJ': ['Ahmedabad', 'Surat', 'Vadodara', 'Rajkot', 'Bhavnagar', 'Jamnagar', 'Junagadh', 'Gandhidham', 'Nadiad', 'Morbi'],
+            'TN': ['Chennai', 'Coimbatore', 'Madurai', 'Tiruchirappalli', 'Salem', 'Tirunelveli', 'Tiruppur', 'Erode', 'Vellore', 'Thoothukudi'],
+            'DL': ['New Delhi', 'North Delhi', 'South Delhi', 'West Delhi', 'East Delhi', 'Rohini', 'Dwarka', 'Najafgarh', 'Narela', 'Saraswati Vihar'],
+            'RJ': ['Jaipur', 'Jodhpur', 'Kota', 'Bikaner', 'Ajmer', 'Udaipur', 'Bhilwara', 'Alwar', 'Bharatpur', 'Sriganganagar'],
+            'UP': ['Lucknow', 'Kanpur', 'Ghaziabad', 'Agra', 'Meerut', 'Varanasi', 'Prayagraj', 'Bareilly', 'Aligarh', 'Moradabad'],
+            'WB': ['Kolkata', 'Howrah', 'Durgapur', 'Asansol', 'Siliguri', 'Maheshtala', 'Rajpur Sonarpur', 'Bhatpara', 'South Dumdum', 'Gopalpur'],
+            'TS': ['Hyderabad', 'Warangal', 'Nizamabad', 'Karimnagar', 'Khammam', 'Ramagundam', 'Mahbubnagar', 'Nalgonda', 'Adilabad', 'Suryapet'],
+            'KL': ['Thiruvananthapuram', 'Kochi', 'Kozhikode', 'Kollam', 'Thrissur', 'Alappuzha', 'Palakkad', 'Malappuram', 'Punnapra', 'Thalassery'],
+        }
 
-        # 4. Create Offices
-        mumbai_go, _ = GlobalOffice.objects.get_or_create(
-            name='Mumbai Central', city=cities['Mumbai'], 
-            defaults={'address': 'Mumbai Main St', 'phone': '9876543210'}
-        )
-        bangalore_go, _ = GlobalOffice.objects.get_or_create(
-            name='Bangalore Hub', city=cities['Bangalore'], 
-            defaults={'address': 'Bangalore Ring Rd', 'phone': '9876543212'}
-        )
+        cities = []
+        for code, city_names in cities_config.items():
+            state = states[code]
+            for city_name in city_names:
+                city, _ = City.objects.get_or_create(name=city_name, state=state)
+                cities.append(city)
 
-        mumbai_office, _ = CompanyOffice.objects.get_or_create(
-            company=company, name='Mumbai Office', city=cities['Mumbai'],
-            defaults={'global_office': mumbai_go, 'office_type': CompanyOffice.OfficeType.OWN}
-        )
-        bangalore_office, _ = CompanyOffice.objects.get_or_create(
-            company=company, name='Bangalore Office', city=cities['Bangalore'],
-            defaults={'global_office': bangalore_go, 'office_type': CompanyOffice.OfficeType.OWN}
-        )
+        # 4. Create Offices (150+)
+        self.stdout.write('Generating 150 detailed branches...')
+        office_types = ['Central', 'Hub', 'Transit', 'Logistics Center', 'Distribution Point', 'Regional Office', 'Annex', 'Warehouse', 'Cargo Terminal', 'Branch Office']
+        streets = ['Main St', 'Ring Rd', 'Highway Jn', 'Industrial Area', 'Cargo Park', 'Station Rd', 'Port Rd', 'Market Rd', 'Business Park', 'Link Road']
+        
+        offices = []
+        for i in range(1, 151):
+            city = random.choice(cities)
+            office_suffix = random.choice(office_types)
+            office_name = f"{city.name} {office_suffix} {i}"
+            address = f"{random.randint(1, 999)}, {random.choice(streets)}, {city.name}, {city.state.name} - {random.randint(400000, 600000)}"
+            phone = f"{random.randint(7000000000, 9999999999)}"
+            contact = f"Manager {i}"
+            
+            # Global Office for discovery
+            go, _ = GlobalOffice.objects.get_or_create(
+                name=office_name,
+                city=city,
+                defaults={
+                    'address': address,
+                    'phone': phone,
+                    'contact_name': contact
+                }
+            )
+            
+            # Company Office for actual operations
+            office, _ = CompanyOffice.objects.get_or_create(
+                company=company,
+                name=office_name,
+                city=city,
+                defaults={
+                    'global_office': go,
+                    'office_type': random.choice([CompanyOffice.OfficeType.OWN, CompanyOffice.OfficeType.PARTNER]),
+                    'address': address,
+                    'phone': phone,
+                    'contact_name': contact
+                }
+            )
+            offices.append(office)
 
         # 5. Roles and Memberships
         UserMembership.objects.get_or_create(user=admin_user, company=company, role=Role.CLIENT_SUPER_ADMIN)
         
-        # 6. Create Parties
+        # 6. Create Parties (50+)
+        self.stdout.write('Generating 50 parties...')
+        company_prefixes = ['Global', 'Metro', 'Indian', 'Swift', 'Dynamic', 'Elite', 'Pacific', 'Total', 'Prime', 'Apex']
+        company_suffixes = ['Industries', 'Solutions', 'Logistics', 'Manufacturing', 'Trading', 'Ventures', 'Corporation', 'Enterprises', 'Steel', 'Automobiles']
+        
         parties = []
-        parties_data = [
-            {'name': 'Reliance Ind', 'phone': '9988776655', 'gst': '27AAAAA0000A1Z5', 'address': 'Reliance Corporate Park, Navi Mumbai'},
-            {'name': 'Tata Steel', 'phone': '9988776644', 'gst': '27BBBBB1111B1Z2', 'address': 'Bombay House, Fort, Mumbai'},
-            {'name': 'Infosys', 'phone': '9988776633', 'gst': '29CCCCC2222C1Z3', 'address': 'Electronics City, Bangalore'},
-        ]
-        for p_data in parties_data:
+        for i in range(1, 51):
+            name = f"{random.choice(company_prefixes)} {random.choice(company_suffixes)} {i}"
+            phone = f"{random.randint(7000000000, 9999999999)}"
+            gst = f"{random.randint(10, 35)}AAAAA{random.randint(1000, 9999)}A1Z{random.randint(1, 9)}"
+            city = random.choice(cities)
+            address = f"{random.randint(10, 500)}, Industrial Estate, {city.name}"
+            
             party, _ = Party.objects.get_or_create(
                 company=company, 
-                name=p_data['name'], 
-                phone=p_data['phone'], 
+                name=name, 
+                phone=phone, 
                 defaults={
-                    'city': cities['Mumbai'] if p_data['name'] != 'Infosys' else cities['Bangalore'], 
-                    'address': p_data['address'],
-                    'gst_number': p_data['gst']
+                    'city': city, 
+                    'address': address,
+                    'gst_number': gst
                 }
             )
             parties.append(party)
@@ -110,8 +156,8 @@ class Command(BaseCommand):
         today = date.today()
         ShipmentSequence.objects.get_or_create(company=company, date=today, defaults={'last_value': 0})
 
-        # 8. Create Sample Shipments (Dockets)
-        self.stdout.write('Creating sample shipments...')
+        # 8. Create Sample Shipments (500)
+        self.stdout.write('Creating 500 sample shipments...')
         statuses = [
             Shipment.StatusChoices.BOOKED,
             Shipment.StatusChoices.IN_TRANSIT,
@@ -120,75 +166,88 @@ class Command(BaseCommand):
             Shipment.StatusChoices.CANCELLED
         ]
         
-        for i in range(1, 16):
-            lr_no = f'LR2026{i:04d}'
-            status = statuses[(i-1) % len(statuses)]
+        for i in range(1, 501):
+            lr_no = f'LR2026{i:05d}'
+            status = random.choice(statuses)
+            
+            origin = random.choice(offices)
+            destination = random.choice([o for o in offices if o != origin])
+            
+            consignor = random.choice(parties)
+            consignee = random.choice([p for p in parties if p != consignor])
+            
+            ship_date = today - timedelta(days=random.randint(0, 60))
             
             shipment, created = Shipment.objects.get_or_create(
                 company=company,
                 lr_no=lr_no,
                 defaults={
-                    'date': today - timedelta(days=i),
+                    'date': ship_date,
                     'status': status,
-                    'from_city': cities['Mumbai'],
-                    'to_city': cities['Bangalore'],
-                    'origin_office': mumbai_office,
-                    'destination_office': bangalore_office,
-                    'consignor_name': parties[i % len(parties)].name,
-                    'consignor_city': cities['Mumbai'],
-                    'consignor_phone': '9876543210',
-                    'consignee_name': parties[(i+1) % len(parties)].name,
-                    'consignee_city': cities['Bangalore'],
-                    'consignee_phone': '9876543212',
-                    'freight': Decimal('1000.00') + (i * 100),
-                    'total_actual_weight': Decimal('50.00') + i,
-                    'total_charge_weight': Decimal('55.00') + i,
-                    'total_packages': 5 + (i % 3)
+                    'from_city': origin.city,
+                    'to_city': destination.city,
+                    'origin_office': origin,
+                    'destination_office': destination,
+                    'consignor_name': consignor.name,
+                    'consignor_city': consignor.city,
+                    'consignor_phone': consignor.phone,
+                    'consignee_name': consignee.name,
+                    'consignee_city': consignee.city,
+                    'consignee_phone': consignee.phone,
+                    'freight': Decimal(str(random.randint(500, 5000))),
+                    'total_actual_weight': Decimal(str(random.randint(10, 200))),
+                    'total_charge_weight': Decimal(str(random.randint(10, 210))),
+                    'total_packages': random.randint(1, 20)
                 }
             )
             
             if created:
                 # Add Line Items
+                pieces = random.randint(1, 10)
                 ShipmentLineItem.objects.create(
                     shipment=shipment,
-                    pieces=5,
-                    actual_weight=Decimal('50.00'),
-                    charged_weight=Decimal('55.00'),
-                    rate=Decimal('20.00'),
-                    charge=Decimal('1000.00')
+                    pieces=pieces,
+                    actual_weight=shipment.total_actual_weight,
+                    charged_weight=shipment.total_charge_weight,
+                    rate=shipment.freight / Decimal(str(pieces)),
+                    charge=shipment.freight
                 )
 
                 # Add Events
                 ShipmentEvent.objects.create(
                     shipment=shipment,
                     event_type=ShipmentEvent.EventType.BOOKED,
-                    office=mumbai_office,
+                    office=origin,
                     actor=admin_user,
-                    occurred_at=timezone.now() - timedelta(days=i)
+                    occurred_at=timezone.make_aware(timezone.datetime.combine(ship_date, timezone.datetime.min.time()))
                 )
 
-                if shipment.status == Shipment.StatusChoices.DELIVERED:
+                if status == Shipment.StatusChoices.DELIVERED:
                     ShipmentEvent.objects.create(
                         shipment=shipment,
                         event_type=ShipmentEvent.EventType.DELIVERED,
-                        office=bangalore_office,
+                        office=destination,
                         actor=admin_user,
                         occurred_at=timezone.now()
                     )
 
         # 9. Create Invoices and Ledger Entries
-        self.stdout.write('Creating accounting records...')
-        for i, party in enumerate(parties[:2]):
+        self.stdout.write('Creating accounting records for some parties...')
+        for i in range(20):
+            party = random.choice(parties)
+            office = random.choice(offices)
+            amount = Decimal(str(random.randint(1000, 10000)))
+            
             invoice, created = Invoice.objects.get_or_create(
                 company=company,
-                invoice_no=f'INV-2026-{i+1}',
+                invoice_no=f'INV-2026-{i+100}',
                 defaults={
-                    'office': mumbai_office,
+                    'office': office,
                     'party': party,
-                    'invoice_date': today,
-                    'due_date': today + timedelta(days=30),
-                    'total_amount': Decimal('5000.00'),
-                    'status': Invoice.Status.SENT
+                    'invoice_date': today - timedelta(days=random.randint(1, 30)),
+                    'due_date': today + timedelta(days=random.randint(1, 30)),
+                    'total_amount': amount,
+                    'status': random.choice([Invoice.Status.SENT, Invoice.Status.PAID, Invoice.Status.PARTIALLY_PAID])
                 }
             )
             
@@ -196,20 +255,40 @@ class Command(BaseCommand):
                 InvoiceLine.objects.create(
                     invoice=invoice,
                     description='Logistics Services',
-                    amount=Decimal('5000.00')
+                    amount=amount
                 )
 
                 # Create Ledger Entry for Invoice (Debit)
                 LedgerEntry.objects.create(
                     company=company,
-                    office=mumbai_office,
+                    office=office,
                     party=party,
                     entry_type=LedgerEntry.EntryType.DEBIT,
                     reference_type=LedgerEntry.ReferenceType.INVOICE,
                     reference_id=invoice.id,
-                    debit=Decimal('5000.00'),
-                    entry_date=today
+                    debit=amount,
+                    entry_date=invoice.invoice_date
                 )
+                
+                if invoice.status == Invoice.Status.PAID:
+                    # Create Payment Receipt and Credit entry
+                    PaymentReceipt.objects.create(
+                        company=company,
+                        office=office,
+                        party=party,
+                        amount=amount,
+                        received_at=timezone.now(),
+                        payment_mode=PaymentReceipt.PaymentMode.BANK_TRANSFER
+                    )
+                    LedgerEntry.objects.create(
+                        company=company,
+                        office=office,
+                        party=party,
+                        entry_type=LedgerEntry.EntryType.CREDIT,
+                        reference_type=LedgerEntry.ReferenceType.PAYMENT,
+                        reference_id="N/A",  # Reference ID for payment entry
+                        credit=amount,
+                        entry_date=today
+                    )
 
-        self.stdout.write(self.style.SUCCESS('Successfully seeded comprehensive data'))
-
+        self.stdout.write(self.style.SUCCESS('Successfully seeded massive comprehensive data'))

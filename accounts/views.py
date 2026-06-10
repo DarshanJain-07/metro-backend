@@ -1,6 +1,7 @@
 import uuid
 
 from django.db import transaction
+from django.db.models import Count, Sum
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -10,9 +11,10 @@ from core.models import CompanyOffice, Party
 from core.policies import can_manage_company, shipment_participates_at_office
 from core.request_context import get_current_company, get_current_office
 from shipments.models import Shipment
-from .models import BankPaymentVerification, Invoice, InvoiceLine, LedgerEntry, PaymentReceipt
+from .models import BankPaymentVerification, Expense, Invoice, InvoiceLine, LedgerEntry, PaymentReceipt
 from .permissions import AccountantPermission
 from .serializers import (
+    ExpenseSerializer,
     InvoiceGenerateSerializer,
     InvoiceSerializer,
     LedgerEntrySerializer,
@@ -206,3 +208,108 @@ class LedgerEntryViewSet(viewsets.ReadOnlyModelViewSet):
                 return LedgerEntry.objects.none()
             qs = qs.filter(office=office)
         return qs
+
+
+class ExpenseViewSet(viewsets.ModelViewSet):
+    serializer_class = ExpenseSerializer
+    permission_classes = [AccountantPermission]
+    queryset = Expense.objects.all()
+
+    def get_queryset(self):
+        company = get_current_company()
+        if not company:
+            return Expense.objects.none()
+        qs = Expense.objects.filter(company=company)
+        
+        # Handle optional filters from query params
+        date_param = self.request.query_params.get("date")
+        if date_param:
+            qs = qs.filter(date=date_param)
+            
+        office_param = self.request.query_params.get("office")
+        if office_param:
+            qs = qs.filter(office_id=office_param)
+
+        if not can_manage_company(self.request.user, company):
+            office = get_current_office()
+            if not office:
+                return Expense.objects.none()
+            # If the user tries to filter for another office, they are blocked
+            if office_param and str(office_param) != str(office.id):
+                return Expense.objects.none()
+            qs = qs.filter(office=office)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        company = get_current_company() or getattr(request.user, "company", None)
+        if not company:
+            return Response({"error": "Company context required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = request.data
+        is_many = isinstance(data, list)
+        
+        serializer = self.get_serializer(data=data, many=is_many)
+        serializer.is_valid(raise_exception=True)
+        
+        if is_many:
+            expenses = [Expense(**item, company=company) for item in serializer.validated_data]
+            Expense.objects.bulk_create(expenses)
+            return Response({"status": "success", "count": len(expenses)}, status=status.HTTP_201_CREATED)
+        else:
+            serializer.save(company=company)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["get"])
+    def summary(self, request):
+        company = get_current_company()
+        if not company:
+            return Response({"error": "Company context required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = self.get_queryset()
+        
+        date_param = request.query_params.get("date")
+        if date_param:
+            qs = qs.filter(date=date_param)
+
+        summary = (
+            qs.values("date", "office", "office__name")
+            .annotate(
+                total_amount=Sum("amount"),
+                entry_count=Count("id")
+            )
+            .order_by("-date", "office__name")
+        )
+
+        # Add a unique ID for frontend key props
+        results = [
+            {**item, "id": f"{item['date']}_{item['office']}"}
+            for item in summary
+        ]
+        
+        return Response(results)
+
+    @action(detail=False, methods=["get"], url_path="daily-summary")
+    def daily_summary(self, request):
+        company = get_current_company()
+        if not company:
+            return Response({"error": "Company context required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = self.get_queryset()
+        
+        daily = (
+            qs.values("date")
+            .annotate(
+                total_amount=Sum("amount"),
+                entry_count=Count("id"),
+                branch_count=Count("office", distinct=True)
+            )
+            .order_by("-date")
+        )
+        
+        # Add ID for React keys
+        results = [
+            {**item, "id": str(item['date'])}
+            for item in daily
+        ]
+        
+        return Response(results)

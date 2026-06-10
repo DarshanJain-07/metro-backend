@@ -5,7 +5,7 @@ from core.models import Role, UserMembership
 
 COMPANY_ROLES = (Role.PLATFORM_ADMIN, Role.CLIENT_SUPER_ADMIN)
 OFFICE_ROLES = (
-    Role.OFFICE_ADMIN,
+    Role.BRANCH_ADMIN,
     Role.BOOKING_USER,
     Role.DELIVERY_USER,
     Role.ACCOUNTANT,
@@ -15,7 +15,7 @@ OFFICE_ROLES = (
 ROLE_ACTIONS = {
     Role.PLATFORM_ADMIN: {"*"},
     Role.CLIENT_SUPER_ADMIN: {"*"},
-    Role.OFFICE_ADMIN: {
+    Role.BRANCH_ADMIN: {
         "office:manage",
         "shipment:book",
         "shipment:create",
@@ -33,20 +33,15 @@ ROLE_ACTIONS = {
     Role.BOOKING_USER: {
         "shipment:create",
         "shipment:book",
-        "shipment:update",
-        "shipment:dispatch",
         "shipment:view",
     },
     Role.DELIVERY_USER: {
         "shipment:receive",
         "shipment:deliver",
-        "shipment:view",
     },
     Role.ACCOUNTANT: {
-        "shipment:view",
         "billing:create",
         "billing:view",
-        "reports:view",
     },
     Role.VIEWER: {"shipment:view", "reports:view"},
 }

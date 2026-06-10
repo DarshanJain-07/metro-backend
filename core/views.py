@@ -264,13 +264,17 @@ class ShipmentMetadataView(APIView):
         ).filter(is_active=True, status=OfficeStatus.ACTIVE)
         cities = City.objects.filter(is_active=True).select_related("state").order_by("id")
         states = State.objects.order_by("id")
+        parties = company_scoped_queryset(
+            Party.objects.select_related("city", "city__state").order_by("name"),
+            user,
+        ).filter(is_active=True)
         office = get_current_office(user)
         return Response(
             {
-                "offices": CompanyOfficeSerializer(offices, many=True).data,
+                "branches": CompanyOfficeSerializer(offices, many=True).data,
                 "cities": CitySerializer(cities, many=True).data,
                 "states": StateSerializer(states, many=True).data,
-                "parties": [],
-                "user_office": office.id if office else None,
+                "parties": PartySerializer(parties, many=True).data,
+                "user_branch": office.id if office else None,
             }
         )

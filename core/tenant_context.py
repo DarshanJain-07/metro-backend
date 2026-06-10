@@ -6,7 +6,7 @@ from core.models import Role, UserMembership
 
 
 OFFICE_SCOPED_ROLES = {
-    Role.OFFICE_ADMIN,
+    Role.BRANCH_ADMIN,
     Role.BOOKING_USER,
     Role.DELIVERY_USER,
     Role.ACCOUNTANT,

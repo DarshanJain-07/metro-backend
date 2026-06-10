@@ -103,3 +103,16 @@ class LedgerEntry(AuditBaseModel):
     class Meta:
         verbose_name_plural = "Ledger Entries"
         ordering = ["-entry_date", "-created_at"]
+
+
+class Expense(AuditBaseModel):
+    company = models.ForeignKey("core.Company", related_name="expenses", on_delete=models.CASCADE)
+    office = models.ForeignKey("core.CompanyOffice", related_name="expenses", on_delete=models.CASCADE)
+    date = models.DateField()
+    category = models.CharField(max_length=100)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    notes = models.TextField(blank=True, null=True)
+
+    class Meta:
+        verbose_name_plural = "Expenses"
+        ordering = ["-date", "-created_at"]

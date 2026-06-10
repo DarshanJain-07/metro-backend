@@ -9,7 +9,7 @@ from rest_framework.decorators import action
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.response import Response
 
-from core.policies import can_manage_company
+from core.policies import can, can_manage_company
 from core.request_context import get_current_company, get_current_office
 from core.viewsets import IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftDeleteMixin, TenantOfficeScopedQuerysetMixin
 from .admin_serializers import OfficeRatePolicySerializer, RateCardSerializer, RateRuleSerializer
@@ -145,6 +145,14 @@ class ShipmentViewSet(
             dest_office = CompanyOffice.objects.get(pk=dest_office_id, company=company)
         except CompanyOffice.DoesNotExist:
             return Response({"detail": "Office not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if not can_manage_company(request.user, company) and not can(
+            request.user,
+            "shipment:create",
+            company=company,
+            office=origin_office,
+        ):
+            return Response({"detail": "You do not have permission to view rates for this origin office."}, status=status.HTTP_403_FORBIDDEN)
 
         rule = lookup_rate(get_current_company(), origin_office, dest_office, basis)
         if not rule:

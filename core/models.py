@@ -257,7 +257,7 @@ class User(AbstractUser):
 class Role(models.TextChoices):
     PLATFORM_ADMIN = "PLATFORM_ADMIN", _("Platform Admin")
     CLIENT_SUPER_ADMIN = "CLIENT_SUPER_ADMIN", _("Client Super Admin")
-    OFFICE_ADMIN = "OFFICE_ADMIN", _("Office Admin")
+    BRANCH_ADMIN = "BRANCH_ADMIN", _("Branch Admin")
     BOOKING_USER = "BOOKING_USER", _("Booking User")
     DELIVERY_USER = "DELIVERY_USER", _("Delivery User")
     ACCOUNTANT = "ACCOUNTANT", _("Accountant")
@@ -274,7 +274,7 @@ class UserMembership(AuditBaseModel):
         constraints = [
             models.UniqueConstraint(fields=["user", "company", "office", "role"], name="unique_user_membership"),
             models.CheckConstraint(
-                condition=~models.Q(role__in=[Role.OFFICE_ADMIN, Role.BOOKING_USER, Role.DELIVERY_USER])
+                condition=~models.Q(role__in=[Role.BRANCH_ADMIN, Role.BOOKING_USER, Role.DELIVERY_USER])
                 | models.Q(office__isnull=False),
                 name="office_required_for_operational_roles",
             ),

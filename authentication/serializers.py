@@ -3,7 +3,7 @@ import django.contrib.auth.password_validation as validators
 from django.core.exceptions import ValidationError
 from rest_framework import serializers
 
-from core.models import Role, UserMembership
+from core.models import CompanyOffice, Role, UserMembership
 from core.request_context import get_current_company
 
 User = get_user_model()
@@ -12,10 +12,17 @@ User = get_user_model()
 class UserMembershipSerializer(serializers.ModelSerializer):
     company_name = serializers.ReadOnlyField(source="company.name")
     office_name = serializers.ReadOnlyField(source="office.name", default=None)
+    branch = serializers.PrimaryKeyRelatedField(
+        source="office",
+        queryset=CompanyOffice.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    branch_name = serializers.ReadOnlyField(source="office.name", default=None)
 
     class Meta:
         model = UserMembership
-        fields = ("id", "user", "company", "company_name", "office", "office_name", "role")
+        fields = ("id", "user", "company", "company_name", "office", "office_name", "branch", "branch_name", "role")
         read_only_fields = ("company",)
         extra_kwargs = {"user": {"required": False}}
 
@@ -25,7 +32,7 @@ class UserMembershipSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"company": "Active company context required."})
         office = data.get("office", getattr(self.instance, "office", None))
         role = data.get("role", getattr(self.instance, "role", None))
-        office_roles = {Role.OFFICE_ADMIN, Role.BOOKING_USER, Role.DELIVERY_USER, Role.ACCOUNTANT, Role.VIEWER}
+        office_roles = {Role.BRANCH_ADMIN, Role.BOOKING_USER, Role.DELIVERY_USER, Role.ACCOUNTANT, Role.VIEWER}
         if role in office_roles and not office:
             raise serializers.ValidationError({"office": "Office is required for this role."})
         if role in (Role.PLATFORM_ADMIN, Role.CLIENT_SUPER_ADMIN) and office:

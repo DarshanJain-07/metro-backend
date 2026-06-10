@@ -85,9 +85,13 @@ class ShipmentLifecycleApiTests(TestCase):
         self.other_office = CompanyOffice.objects.create(company=self.other_company, name="Other Office", city=self.city)
         self.booking_user = User.objects.create_user(username="booking_api", password="pw", company=self.company, office=self.origin)
         self.transit_user = User.objects.create_user(username="transit_api", password="pw", company=self.company, office=self.transit)
+        self.branch_admin = User.objects.create_user(username="branch_admin_api", password="pw", company=self.company, office=self.origin)
+        self.accountant = User.objects.create_user(username="shipment_accountant_api", password="pw", company=self.company, office=self.origin)
         self.admin_user = User.objects.create_user(username="admin_api", password="pw", company=self.company)
         UserMembership.objects.create(user=self.booking_user, company=self.company, office=self.origin, role=Role.BOOKING_USER)
         UserMembership.objects.create(user=self.transit_user, company=self.company, office=self.transit, role=Role.DELIVERY_USER)
+        UserMembership.objects.create(user=self.branch_admin, company=self.company, office=self.origin, role=Role.BRANCH_ADMIN)
+        UserMembership.objects.create(user=self.accountant, company=self.company, office=self.origin, role=Role.ACCOUNTANT)
         UserMembership.objects.create(user=self.admin_user, company=self.company, role=Role.CLIENT_SUPER_ADMIN)
 
     def shipment_payload(self):
@@ -155,6 +159,97 @@ class ShipmentLifecycleApiTests(TestCase):
         self.assertEqual(shipment.status, Shipment.StatusChoices.BOOKED)
         self.assertEqual(shipment.events.count(), 1)
         self.assertEqual(shipment.events.get().event_type, ShipmentEvent.EventType.BOOKED)
+
+    def test_super_admin_lists_all_company_branch_shipments(self):
+        origin_shipment = self.make_shipment(lr_no="LR-ORIGIN", origin_office=self.origin, destination_office=self.destination)
+        transit_shipment = self.make_shipment(lr_no="LR-TRANSIT", origin_office=self.transit, destination_office=self.destination)
+
+        self.client.force_authenticate(user=self.admin_user)
+        response = self.client.get(reverse("shipment-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = {item["id"] for item in self.response_items(response)}
+        self.assertIn(origin_shipment.id, ids)
+        self.assertIn(transit_shipment.id, ids)
+
+    def test_branch_admin_lists_only_own_branch_shipments(self):
+        origin_shipment = self.make_shipment(lr_no="LR-BRANCH", origin_office=self.origin, destination_office=self.destination)
+        other_branch_shipment = self.make_shipment(lr_no="LR-OTHER-BRANCH", origin_office=self.transit, destination_office=self.destination)
+
+        self.client.force_authenticate(user=self.branch_admin)
+        response = self.client.get(reverse("shipment-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = {item["id"] for item in self.response_items(response)}
+        self.assertIn(origin_shipment.id, ids)
+        self.assertNotIn(other_branch_shipment.id, ids)
+
+    def test_booking_user_can_view_but_not_update_existing_shipment(self):
+        shipment = self.make_shipment(lr_no="LR-BOOKING-READONLY", origin_office=self.origin, destination_office=self.destination)
+
+        self.client.force_authenticate(user=self.booking_user)
+        retrieve_response = self.client.get(reverse("shipment-detail", kwargs={"pk": shipment.id}))
+        update_response = self.client.patch(
+            reverse("shipment-detail", kwargs={"pk": shipment.id}),
+            {"notes": "Should not change", "updated_at": shipment.updated_at.isoformat()},
+            format="json",
+        )
+        dispatch_response = self.client.post(reverse("shipment-dispatch", kwargs={"pk": shipment.id}), {}, format="json")
+
+        self.assertEqual(retrieve_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(update_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(dispatch_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_delivery_user_can_update_delivery_workflow_only(self):
+        shipment = self.make_shipment(
+            lr_no="LR-DELIVERY-ONLY",
+            status=Shipment.StatusChoices.RECEIVED,
+            origin_office=self.origin,
+            destination_office=self.transit,
+        )
+
+        self.client.force_authenticate(user=self.transit_user)
+        create_response = self.client.post(reverse("shipment-list"), self.shipment_payload(), format="json")
+        update_response = self.client.patch(
+            reverse("shipment-detail", kwargs={"pk": shipment.id}),
+            {"notes": "Should not change", "updated_at": shipment.updated_at.isoformat()},
+            format="json",
+        )
+        delivered_response = self.client.post(
+            reverse("shipment-mark-delivered", kwargs={"pk": shipment.id}),
+            {"received_by_name": "Receiver", "received_by_phone": "1234567890"},
+            format="json",
+        )
+
+        self.assertEqual(create_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(update_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(delivered_response.status_code, status.HTTP_200_OK)
+
+    def test_delivery_user_cannot_use_general_shipment_list(self):
+        self.make_shipment(lr_no="LR-DELIVERY-LIST", origin_office=self.origin, destination_office=self.transit)
+
+        self.client.force_authenticate(user=self.transit_user)
+        list_response = self.client.get(reverse("shipment-list"))
+        incoming_response = self.client.get(reverse("shipment-incoming"))
+
+        self.assertEqual(list_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(incoming_response.status_code, status.HTTP_200_OK)
+
+    def test_accountant_cannot_write_shipment_functions(self):
+        shipment = self.make_shipment(lr_no="LR-ACCOUNTANT-BLOCKED", origin_office=self.origin, destination_office=self.destination)
+
+        self.client.force_authenticate(user=self.accountant)
+        list_response = self.client.get(reverse("shipment-list"))
+        create_response = self.client.post(reverse("shipment-list"), self.shipment_payload(), format="json")
+        update_response = self.client.patch(
+            reverse("shipment-detail", kwargs={"pk": shipment.id}),
+            {"notes": "Should not change", "updated_at": shipment.updated_at.isoformat()},
+            format="json",
+        )
+
+        self.assertEqual(list_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(create_response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(update_response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_book_rejects_already_booked_created_shipment_without_duplicate_event(self):
         self.client.force_authenticate(user=self.booking_user)

@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from core.request_context import get_current_company
-from .models import BankPaymentVerification, Invoice, InvoiceLine, LedgerEntry, PaymentReceipt
+from .models import BankPaymentVerification, Expense, Invoice, InvoiceLine, LedgerEntry, PaymentReceipt
 
 
 class InvoiceLineSerializer(serializers.ModelSerializer):
@@ -114,3 +114,32 @@ class LedgerEntrySerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = ["company"]
+
+
+class ExpenseSerializer(serializers.ModelSerializer):
+    office_name = serializers.CharField(source="office.name", read_only=True)
+
+    class Meta:
+        model = Expense
+        fields = [
+            "id",
+            "company",
+            "office",
+            "office_name",
+            "date",
+            "category",
+            "amount",
+            "notes",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["company"]
+
+    def validate(self, data):
+        company = get_current_company()
+        if not company:
+            raise serializers.ValidationError({"company": "Active company context required."})
+        office = data.get("office", getattr(self.instance, "office", None))
+        if office and office.company != company:
+            raise serializers.ValidationError({"office": "Office does not belong to the active company."})
+        return data

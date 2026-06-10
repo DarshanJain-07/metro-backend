@@ -22,17 +22,26 @@ class StrictActionPermission(permissions.BasePermission):
         if request.user.is_superuser:
             return True
         action = getattr(view, "action", None)
-        if action in ["list", "retrieve", "incoming", "events"]:
-            return True
+        company = get_current_company()
+        office = get_current_office()
+        if action in ["list", "retrieve", "events"]:
+            return can(request.user, "shipment:view", company=company, office=office)
+        if action == "incoming":
+            return can(
+                request.user,
+                "shipment:receive",
+                company=company,
+                office=office,
+            ) or can(request.user, "shipment:deliver", company=company, office=office)
         if action == "create":
-            company = get_current_company()
-            office = get_current_office()
             if office:
                 return can(request.user, "shipment:create", company=company, office=office)
             return can_manage_company(request.user, company)
         if action in ["book", "dispatch_shipment", "receive", "assign_delivery", "mark_delivered", "cancel"]:
             return True
-        return True
+        if action in ["suggested_rate", "preview"]:
+            return can(request.user, "shipment:create", company=company, office=office)
+        return False
 
     def has_object_permission(self, request, view, obj):
         if not request.user or not request.user.is_authenticated:

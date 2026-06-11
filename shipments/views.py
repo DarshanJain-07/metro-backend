@@ -112,7 +112,15 @@ class ShipmentViewSet(
         )
         if self.action in ["retrieve", "update", "partial_update"]:
             qs = qs.prefetch_related("line_items", "events")
-        return self.apply_office_scope(qs).distinct()
+        qs = self.apply_office_scope(qs)
+        if self.action == "list":
+            requested_origin_office = self.request.query_params.get("origin_office")
+            office = get_current_office()
+            if requested_origin_office:
+                qs = qs.filter(origin_office_id=requested_origin_office)
+            elif office:
+                qs = qs.filter(origin_office=office)
+        return qs.distinct()
 
     def perform_create(self, serializer):
         company = get_current_company()
@@ -292,8 +300,8 @@ class ShipmentViewSet(
         filtered_qs = self.filter_queryset(qs)
         page = self.paginate_queryset(filtered_qs)
         if page is not None:
-            return self.get_paginated_response(ShipmentListSerializer(page, many=True).data)
-        return Response(ShipmentListSerializer(filtered_qs, many=True).data)
+            return self.get_paginated_response(ShipmentListSerializer(page, many=True, context={"request": request}).data)
+        return Response(ShipmentListSerializer(filtered_qs, many=True, context={"request": request}).data)
 
     def _workflow_response(self, callback):
         shipment = self.get_object()

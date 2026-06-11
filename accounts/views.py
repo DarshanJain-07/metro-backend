@@ -65,7 +65,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         if shipments.count() != len(data["shipments"]):
             return Response({"error": "One or more shipments not found or invalid."}, status=status.HTTP_400_BAD_REQUEST)
         for shipment in shipments:
-            if shipment.payment_type != Shipment.PaymentTypeChoices.TBB:
+            if shipment.basis != Shipment.BasisChoices.TBB:
                 return Response({"error": f"Shipment {shipment.lr_no} is not TBB and cannot be invoiced."}, status=status.HTTP_400_BAD_REQUEST)
             if not shipment_participates_at_office(shipment, office):
                 return Response({"error": f"Shipment {shipment.lr_no} does not participate in the selected billing office."}, status=status.HTTP_400_BAD_REQUEST)

@@ -2,12 +2,54 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from rest_framework import serializers
 
+from core.policies import (
+    can_assign_delivery,
+    can_cancel_shipment,
+    can_dispatch_shipment,
+    can_edit_shipment,
+    can_mark_delivered,
+    can_receive_shipment,
+)
 from core.request_context import get_current_company, get_current_office
 from .models import DeliveryAssignment, ProofOfDelivery, Shipment, ShipmentEvent, ShipmentLineItem
 from .services import get_office_rate_policy, lookup_rate
 
 
+def get_available_shipment_actions(user, shipment):
+    if not user or not user.is_authenticated:
+        return []
+
+    office = get_current_office()
+    actions = []
+    if can_edit_shipment(user, shipment):
+        actions.append("shipment:update")
+    is_closed = shipment.status in [
+        Shipment.StatusChoices.DELIVERED,
+        Shipment.StatusChoices.CANCELLED,
+    ]
+    if not is_closed and can_dispatch_shipment(user, shipment):
+        actions.append("shipment:dispatch")
+    if (
+        office
+        and shipment.status in [Shipment.StatusChoices.IN_TRANSIT, Shipment.StatusChoices.BOOKED]
+        and can_receive_shipment(user, shipment, office)
+    ):
+        actions.append("shipment:receive")
+    if shipment.status == Shipment.StatusChoices.RECEIVED and can_assign_delivery(user, shipment):
+        actions.append("shipment:assign_delivery")
+    if (
+        shipment.status in [Shipment.StatusChoices.RECEIVED, Shipment.StatusChoices.OUT_FOR_DELIVERY]
+        and can_mark_delivered(user, shipment)
+    ):
+        actions.append("shipment:deliver")
+    if shipment.status in [Shipment.StatusChoices.DRAFT, Shipment.StatusChoices.BOOKED] and can_cancel_shipment(user, shipment):
+        actions.append("shipment:cancel")
+    return actions
+
+
 class ProofOfDeliverySerializer(serializers.ModelSerializer):
+    delivered_at = serializers.DateTimeField(required=False)
+
     class Meta:
         model = ProofOfDelivery
         fields = ["received_by_name", "received_by_phone", "delivery_notes", "delivered_at"]
@@ -83,7 +125,10 @@ class ShipmentListSerializer(serializers.ModelSerializer):
     destination_office_name = serializers.ReadOnlyField(source="destination_office.name")
     to_city_name = serializers.ReadOnlyField(source="to_city.name")
     total_amount = serializers.ReadOnlyField(source="final_freight")
+    is_billed = serializers.SerializerMethodField()
+    payment_status = serializers.SerializerMethodField()
     latest_event_timestamp = serializers.SerializerMethodField()
+    available_actions = serializers.SerializerMethodField()
 
     class Meta:
         model = Shipment
@@ -93,6 +138,7 @@ class ShipmentListSerializer(serializers.ModelSerializer):
             "docket_no",
             "date",
             "status",
+            "origin_office",
             "origin_office_name",
             "destination_office_name",
             "to_city_name",
@@ -102,14 +148,32 @@ class ShipmentListSerializer(serializers.ModelSerializer):
             "final_freight",
             "total_amount",
             "remaining_balance",
+            "basis",
             "payment_type",
+            "is_billed",
+            "payment_status",
             "delivery_type",
             "latest_event_timestamp",
+            "available_actions",
         ]
+
+    def get_is_billed(self, obj):
+        return obj.invoice_lines.exists()
+
+    def get_payment_status(self, obj):
+        if obj.basis == Shipment.BasisChoices.PAID:
+            return "PAID"
+        if obj.advance_amount > 0:
+            return "PARTIAL"
+        return "UNPAID"
 
     def get_latest_event_timestamp(self, obj):
         event = obj.events.order_by("-occurred_at").first()
         return event.occurred_at if event else None
+
+    def get_available_actions(self, obj):
+        request = self.context.get("request")
+        return get_available_shipment_actions(getattr(request, "user", None), obj)
 
 
 class ShipmentSerializer(serializers.ModelSerializer):
@@ -120,6 +184,7 @@ class ShipmentSerializer(serializers.ModelSerializer):
     line_items = ShipmentLineItemSerializer(many=True)
     events = ShipmentEventSerializer(many=True, read_only=True)
     delivery_assignments = DeliveryAssignmentSerializer(many=True, read_only=True)
+    available_actions = serializers.SerializerMethodField()
 
     class Meta:
         model = Shipment
@@ -164,6 +229,7 @@ class ShipmentSerializer(serializers.ModelSerializer):
             "line_items",
             "events",
             "delivery_assignments",
+            "available_actions",
             "created_at",
             "updated_at",
             "created_by",
@@ -178,11 +244,16 @@ class ShipmentSerializer(serializers.ModelSerializer):
             "total_packages",
             "total_actual_weight",
             "total_charge_weight",
+            "available_actions",
             "created_at",
             "updated_at",
             "created_by",
             "updated_by",
         ]
+
+    def get_available_actions(self, obj):
+        request = self.context.get("request")
+        return get_available_shipment_actions(getattr(request, "user", None), obj)
 
     def to_internal_value(self, data):
         data = data.copy()
@@ -251,7 +322,7 @@ class ShipmentSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"detail": "You do not have permission to update this shipment."})
 
         if resolved_origin and resolved_destination and line_items_data:
-            basis = data.get("basis", getattr(self.instance, "basis", Shipment.BasisChoices.WEIGHT))
+            basis = data.get("basis", getattr(self.instance, "basis", Shipment.BasisChoices.PAID))
             policy = get_office_rate_policy(company, resolved_origin)
             rule = lookup_rate(company, resolved_origin, resolved_destination, basis)
             if rule:

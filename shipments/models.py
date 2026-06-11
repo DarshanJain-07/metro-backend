@@ -20,14 +20,15 @@ class Shipment(AuditBaseModel):
         CANCELLED = "CANCELLED", _("Cancelled")
 
     class BasisChoices(models.TextChoices):
-        WEIGHT = "WEIGHT", _("Weight")
-        FIXED = "FIXED", _("Fixed")
-        UNIT = "UNIT", _("Unit")
-
-    class PaymentTypeChoices(models.TextChoices):
         PAID = "PAID", _("Paid")
         TO_PAY = "TO_PAY", _("To Pay")
         TBB = "TBB", _("TBB (To Be Billed)")
+
+    class PaymentTypeChoices(models.TextChoices):
+        CASH = "CASH", _("Cash")
+        BANK = "BANK", _("Bank/UPI")
+        BRANCH = "BRANCH", _("Branch")
+        CREDIT = "CREDIT", _("Credit")
 
     class ModeChoices(models.TextChoices):
         ROAD = "ROAD", _("Road")
@@ -51,8 +52,8 @@ class Shipment(AuditBaseModel):
     to_city = models.ForeignKey("core.City", related_name="+", on_delete=models.PROTECT)
     destination_office = models.ForeignKey("core.CompanyOffice", related_name="incoming_shipments", on_delete=models.PROTECT)
 
-    basis = models.CharField(max_length=50, choices=BasisChoices.choices, default=BasisChoices.WEIGHT)
-    payment_type = models.CharField(max_length=50, choices=PaymentTypeChoices.choices, default=PaymentTypeChoices.PAID)
+    basis = models.CharField(max_length=50, choices=BasisChoices.choices, default=BasisChoices.PAID)
+    payment_type = models.CharField(max_length=50, choices=PaymentTypeChoices.choices, default=PaymentTypeChoices.CASH)
     mode = models.CharField(max_length=50, choices=ModeChoices.choices, default=ModeChoices.ROAD)
     delivery_type = models.CharField(max_length=50, choices=DeliveryTypeChoices.choices, default=DeliveryTypeChoices.DOOR)
 

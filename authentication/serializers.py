@@ -4,6 +4,7 @@ from django.core.exceptions import ValidationError
 from rest_framework import serializers
 
 from core.models import CompanyOffice, Role, UserMembership
+from core.policies import ROLE_ACTIONS
 from core.request_context import get_current_company
 
 User = get_user_model()
@@ -19,12 +20,16 @@ class UserMembershipSerializer(serializers.ModelSerializer):
         allow_null=True,
     )
     branch_name = serializers.ReadOnlyField(source="office.name", default=None)
+    permissions = serializers.SerializerMethodField()
 
     class Meta:
         model = UserMembership
-        fields = ("id", "user", "company", "company_name", "office", "office_name", "branch", "branch_name", "role")
+        fields = ("id", "user", "company", "company_name", "office", "office_name", "branch", "branch_name", "role", "permissions")
         read_only_fields = ("company",)
         extra_kwargs = {"user": {"required": False}}
+
+    def get_permissions(self, obj):
+        return sorted(ROLE_ACTIONS.get(obj.role, set()))
 
     def validate(self, data):
         company = get_current_company()
@@ -48,6 +53,7 @@ class UserSerializer(serializers.ModelSerializer):
     memberships = UserMembershipSerializer(many=True, read_only=True)
     password = serializers.CharField(write_only=True, required=False, allow_blank=False)
     membership_inputs = UserMembershipSerializer(many=True, write_only=True, required=False)
+    permissions = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -64,8 +70,19 @@ class UserSerializer(serializers.ModelSerializer):
             "is_owner",
             "memberships",
             "membership_inputs",
+            "permissions",
         )
-        read_only_fields = ("id", "is_superuser", "is_owner", "company_name", "office_name", "memberships")
+        read_only_fields = ("id", "is_superuser", "is_owner", "company_name", "office_name", "memberships", "permissions")
+
+    def get_permissions(self, obj):
+        if obj.is_superuser:
+            return ["*"]
+        permissions = set()
+        memberships = obj.memberships.all()
+        for membership in memberships:
+            if membership.is_active:
+                permissions.update(ROLE_ACTIONS.get(membership.role, set()))
+        return sorted(permissions)
 
     def validate(self, data):
         company = get_current_company()

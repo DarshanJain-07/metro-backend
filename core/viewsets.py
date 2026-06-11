@@ -39,6 +39,9 @@ class TenantOfficeScopedQuerysetMixin:
             return qs
 
         company = get_current_company()
+        if company and hasattr(qs.model, "company"):
+            qs = qs.filter(company=company)
+
         if company and has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN]):
             return qs
 

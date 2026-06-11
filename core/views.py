@@ -1,4 +1,4 @@
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Count, F, Sum
 from django.http import Http404
 from rest_framework import serializers, status, viewsets
@@ -98,15 +98,15 @@ class DashboardStatsView(APIView):
             payments = payments.filter(office_id__in=office_ids)
 
         stats = {
-            "total_shipments": shipments.count(),
+            "total_dockets": shipments.count(),
             "pending_deliveries": shipments.filter(status__in=["IN_TRANSIT", "RECEIVED"]).count(),
             "total_revenue": invoices.aggregate(Sum("total_amount"))["total_amount__sum"] or 0,
             "total_receivables": (invoices.aggregate(Sum("total_amount"))["total_amount__sum"] or 0)
             - (invoices.aggregate(Sum("paid_amount"))["paid_amount__sum"] or 0),
-            "recent_shipments": shipments.order_by("-created_at")[:5]
-            .annotate(total_amount=F("final_freight"))
-            .values("lr_no", "status", "total_amount", "date"),
-            "shipment_status_distribution": list(shipments.values("status").annotate(count=Count("id"))),
+            "recent_dockets": shipments.order_by("-created_at")[:5]
+            .annotate(total_amount=F("final_freight"), docket_no=F("lr_no"))
+            .values("docket_no", "status", "total_amount", "date"),
+            "docket_status_distribution": list(shipments.values("status").annotate(count=Count("id"))),
         }
         return Response(stats)
 
@@ -197,6 +197,29 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
             serializer.save(company=company, **save_kwargs)
         else:
             serializer.save(**save_kwargs)
+
+    @action(detail=False, methods=["post"], url_path="bulk-create")
+    @transaction.atomic
+    def bulk_create(self, request, resource=None):
+        config = self._get_config()
+        rows = request.data.get("rows") if isinstance(request.data, dict) else request.data
+        if not isinstance(rows, list):
+            raise serializers.ValidationError({"rows": "Expected a list of records."})
+        if not rows:
+            raise serializers.ValidationError({"rows": "At least one record is required."})
+
+        serializer = self.get_serializer(data=rows, many=True)
+        serializer.is_valid(raise_exception=True)
+
+        if config["company_scoped"]:
+            company = get_current_company()
+            if not company:
+                raise serializers.ValidationError({"detail": "Active company context required."})
+            instances = serializer.save(company=company)
+        else:
+            instances = serializer.save()
+
+        return Response(self.get_serializer(instances, many=True).data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["post"], url_path="import")
     def import_office(self, request, resource=None):

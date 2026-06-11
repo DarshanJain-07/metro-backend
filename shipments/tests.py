@@ -101,8 +101,8 @@ class ShipmentLifecycleApiTests(TestCase):
             "origin_office": self.origin.id,
             "to_city": self.city.id,
             "destination_office": self.destination.id,
-            "basis": Shipment.BasisChoices.WEIGHT,
-            "payment_type": Shipment.PaymentTypeChoices.PAID,
+            "basis": Shipment.BasisChoices.PAID,
+            "payment_type": Shipment.PaymentTypeChoices.CASH,
             "mode": Shipment.ModeChoices.ROAD,
             "delivery_type": Shipment.DeliveryTypeChoices.DOOR,
             "consignor_name": "Sender",
@@ -163,6 +163,14 @@ class ShipmentLifecycleApiTests(TestCase):
     def test_super_admin_lists_all_company_branch_shipments(self):
         origin_shipment = self.make_shipment(lr_no="LR-ORIGIN", origin_office=self.origin, destination_office=self.destination)
         transit_shipment = self.make_shipment(lr_no="LR-TRANSIT", origin_office=self.transit, destination_office=self.destination)
+        other_company_shipment = self.make_shipment(
+            company=self.other_company,
+            lr_no="LR-OTHER-COMPANY",
+            origin_office=self.other_office,
+            destination_office=self.other_office,
+            from_city=self.other_office.city,
+            to_city=self.other_office.city,
+        )
 
         self.client.force_authenticate(user=self.admin_user)
         response = self.client.get(reverse("shipment-list"))
@@ -171,10 +179,12 @@ class ShipmentLifecycleApiTests(TestCase):
         ids = {item["id"] for item in self.response_items(response)}
         self.assertIn(origin_shipment.id, ids)
         self.assertIn(transit_shipment.id, ids)
+        self.assertNotIn(other_company_shipment.id, ids)
 
     def test_branch_admin_lists_only_own_branch_shipments(self):
         origin_shipment = self.make_shipment(lr_no="LR-BRANCH", origin_office=self.origin, destination_office=self.destination)
         other_branch_shipment = self.make_shipment(lr_no="LR-OTHER-BRANCH", origin_office=self.transit, destination_office=self.destination)
+        incoming_shipment = self.make_shipment(lr_no="LR-INCOMING-BRANCH", origin_office=self.transit, destination_office=self.origin)
 
         self.client.force_authenticate(user=self.branch_admin)
         response = self.client.get(reverse("shipment-list"))
@@ -183,6 +193,7 @@ class ShipmentLifecycleApiTests(TestCase):
         ids = {item["id"] for item in self.response_items(response)}
         self.assertIn(origin_shipment.id, ids)
         self.assertNotIn(other_branch_shipment.id, ids)
+        self.assertNotIn(incoming_shipment.id, ids)
 
     def test_booking_user_can_view_but_not_update_existing_shipment(self):
         shipment = self.make_shipment(lr_no="LR-BOOKING-READONLY", origin_office=self.origin, destination_office=self.destination)
@@ -312,7 +323,7 @@ class ShipmentLifecycleApiTests(TestCase):
             rate_card=card,
             origin_city=self.city,
             destination_city=self.city,
-            basis=Shipment.BasisChoices.WEIGHT,
+            basis=Shipment.BasisChoices.PAID,
             rate_type=ShipmentLineItem.RateTypeChoices.PER_KG,
             rate=Decimal("10.00"),
         )
@@ -320,7 +331,7 @@ class ShipmentLifecycleApiTests(TestCase):
             rate_card=other_card,
             origin_city=self.city,
             destination_city=self.city,
-            basis=Shipment.BasisChoices.WEIGHT,
+            basis=Shipment.BasisChoices.PAID,
             rate_type=ShipmentLineItem.RateTypeChoices.PER_KG,
             rate=Decimal("20.00"),
         )
@@ -338,7 +349,7 @@ class ShipmentLifecycleApiTests(TestCase):
                 "origin_city": self.city.id,
                 "destination_city": self.city.id,
                 "origin_office": self.other_office.id,
-                "basis": Shipment.BasisChoices.WEIGHT,
+                "basis": Shipment.BasisChoices.PAID,
                 "rate_type": ShipmentLineItem.RateTypeChoices.PER_KG,
                 "rate": "30.00",
             },
@@ -348,6 +359,6 @@ class ShipmentLifecycleApiTests(TestCase):
 
         suggested_response = self.client.get(
             reverse("shipment-suggested-rate"),
-            {"origin_office": self.origin.id, "destination_office": self.other_office.id, "basis": Shipment.BasisChoices.WEIGHT},
+            {"origin_office": self.origin.id, "destination_office": self.other_office.id, "basis": Shipment.BasisChoices.PAID},
         )
         self.assertEqual(suggested_response.status_code, status.HTTP_404_NOT_FOUND)

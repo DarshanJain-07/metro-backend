@@ -280,13 +280,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             .order_by("-date", "office__name")
         )
 
-        # Add a unique ID for frontend key props
-        results = [
-            {**item, "id": f"{item['date']}_{item['office']}"}
-            for item in summary
-        ]
-        
-        return Response(results)
+        return Response(summary)
 
     @action(detail=False, methods=["get"], url_path="daily-summary")
     def daily_summary(self, request):
@@ -306,10 +300,4 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             .order_by("-date")
         )
         
-        # Add ID for React keys
-        results = [
-            {**item, "id": str(item['date'])}
-            for item in daily
-        ]
-        
-        return Response(results)
+        return Response(daily)

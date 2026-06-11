@@ -1,4 +1,4 @@
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.db.models import Count, F, Sum
 from django.http import Http404
 from rest_framework import serializers, status, viewsets
@@ -199,7 +199,6 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
             serializer.save(**save_kwargs)
 
     @action(detail=False, methods=["post"], url_path="bulk-create")
-    @transaction.atomic
     def bulk_create(self, request, resource=None):
         config = self._get_config()
         rows = request.data.get("rows") if isinstance(request.data, dict) else request.data
@@ -208,16 +207,46 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
         if not rows:
             raise serializers.ValidationError({"rows": "At least one record is required."})
 
-        serializer = self.get_serializer(data=rows, many=True)
-        serializer.is_valid(raise_exception=True)
+        row_serializers = []
+        row_errors = []
+        for index, row in enumerate(rows, start=1):
+            serializer = self.get_serializer(data=row)
+            if serializer.is_valid():
+                row_serializers.append((index, serializer))
+            else:
+                row_errors.append({"row": index, "errors": serializer.errors})
 
+        if row_errors:
+            return Response({"errors": row_errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        save_kwargs = {}
         if config["company_scoped"]:
             company = get_current_company()
             if not company:
                 raise serializers.ValidationError({"detail": "Active company context required."})
-            instances = serializer.save(company=company)
-        else:
-            instances = serializer.save()
+            save_kwargs["company"] = company
+
+        instances = []
+        try:
+            with transaction.atomic():
+                for index, serializer in row_serializers:
+                    try:
+                        instances.append(serializer.save(**save_kwargs))
+                    except IntegrityError:
+                        raise serializers.ValidationError(
+                            {
+                                "errors": [
+                                    {
+                                        "row": index,
+                                        "errors": [
+                                            "Could not save this row because it conflicts with existing data."
+                                        ],
+                                    }
+                                ]
+                            }
+                        )
+        except serializers.ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(self.get_serializer(instances, many=True).data, status=status.HTTP_201_CREATED)
 

@@ -82,14 +82,19 @@ class UserViewSet(viewsets.ModelViewSet):
     permission_classes = [UserManagementPermission]
 
     def get_queryset(self):
+        base_qs = User.objects.select_related("company", "office").prefetch_related(
+            "memberships",
+            "memberships__company",
+            "memberships__office",
+        )
         user = self.request.user
         if can_manage_company(user, None):
-            return User.objects.all()
+            return base_qs
         
         company = get_current_company()
         if company:
-            return User.objects.filter(memberships__company=company, memberships__is_active=True).distinct()
-        return User.objects.none()
+            return base_qs.filter(memberships__company=company, memberships__is_active=True).distinct()
+        return base_qs.none()
 
     def perform_create(self, serializer):
         company = get_current_company()

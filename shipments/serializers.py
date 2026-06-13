@@ -159,6 +159,8 @@ class ShipmentListSerializer(serializers.ModelSerializer):
         ]
 
     def get_is_billed(self, obj):
+        if hasattr(obj, "is_billed"):
+            return obj.is_billed
         return obj.invoice_lines.exists()
 
     def get_payment_status(self, obj):
@@ -169,6 +171,8 @@ class ShipmentListSerializer(serializers.ModelSerializer):
         return "UNPAID"
 
     def get_latest_event_timestamp(self, obj):
+        if hasattr(obj, "latest_event_timestamp"):
+            return obj.latest_event_timestamp
         event = obj.events.order_by("-occurred_at").first()
         return event.occurred_at if event else None
 

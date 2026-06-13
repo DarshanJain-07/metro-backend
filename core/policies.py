@@ -48,21 +48,61 @@ ROLE_ACTIONS = {
 }
 
 
+def user_memberships(user):
+    if not user or not user.is_authenticated:
+        return []
+
+    from core.request_context import get_current_request
+
+    request = get_current_request()
+    cache_key = f"_user_memberships_{user.id}"
+    memberships = getattr(request, cache_key, None) if request else None
+
+    if memberships is None:
+        memberships = list(
+            UserMembership.unscoped_objects.filter(user=user, is_active=True).select_related("company", "office")
+        )
+        if request:
+            setattr(request, cache_key, memberships)
+
+    return memberships
+
+
 def has_role(user, company=None, office=None, roles=None):
     if not user or not user.is_authenticated or not roles:
         return False
-    qs = UserMembership.unscoped_objects.filter(user=user, is_active=True, role__in=roles)
-    if company:
-        qs = qs.filter(company=company)
-    if office:
-        qs = qs.filter(office=office)
-    return qs.exists()
+
+    for membership in user_memberships(user):
+        if company and membership.company_id != company.id:
+            continue
+        if office and membership.office_id != office.id:
+            continue
+        if membership.role in roles:
+            return True
+    return False
 
 
 def active_office_ids(user, company):
     if not user or not user.is_authenticated or not company:
         return []
-    return list(
+
+    from core.request_context import get_current_request
+
+    request = get_current_request()
+
+    memberships_cache_key = f"_user_memberships_{user.id}"
+    if request and hasattr(request, memberships_cache_key):
+        memberships = getattr(request, memberships_cache_key)
+        return [
+            m.office_id for m in memberships
+            if m.company_id == company.id and m.office_id is not None
+        ]
+
+    cache_key = f"_active_office_ids_{company.id}"
+    if request and hasattr(request, cache_key):
+        return getattr(request, cache_key)
+
+    office_ids = list(
         UserMembership.unscoped_objects.filter(
             user=user,
             company=company,
@@ -70,6 +110,11 @@ def active_office_ids(user, company):
             is_active=True,
         ).values_list("office_id", flat=True)
     )
+
+    if request:
+        setattr(request, cache_key, office_ids)
+
+    return office_ids
 
 
 def require_active_company(request):
@@ -109,11 +154,9 @@ def can(user, action, company=None, office=None, resource=None):
     if user.is_superuser:
         return True
 
-    qs = UserMembership.unscoped_objects.filter(user=user, is_active=True)
-    if company:
-        qs = qs.filter(company=company)
-
-    for membership in qs:
+    for membership in user_memberships(user):
+        if company and membership.company_id != company.id:
+            continue
         if office and membership.office_id and membership.office_id != office.id:
             continue
         if office and membership.office_id is None and membership.role not in COMPANY_ROLES:

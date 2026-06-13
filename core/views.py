@@ -356,6 +356,19 @@ class ShipmentMetadataView(APIView):
 
     def get(self, request):
         user = request.user
+        company = get_current_company()
+        if not company:
+            return Response({"error": "No company context found"}, status=400)
+        office = get_current_office(user)
+
+        from django.core.cache import cache
+
+        office_cache_id = office.id if office else "none"
+        cache_key = f"shipment_metadata_{company.id}_{office_cache_id}_{user.id}"
+        cached_data = cache.get(cache_key)
+        if cached_data is not None:
+            return Response(cached_data)
+
         offices = company_scoped_queryset(
             CompanyOffice.objects.select_related("city", "city__state").order_by("name"),
             user,
@@ -366,13 +379,13 @@ class ShipmentMetadataView(APIView):
             Party.objects.select_related("city", "city__state").order_by("name"),
             user,
         ).filter(is_active=True)
-        office = get_current_office(user)
-        return Response(
-            {
-                "branches": CompanyOfficeSerializer(offices, many=True).data,
-                "cities": CitySerializer(cities, many=True).data,
-                "states": StateSerializer(states, many=True).data,
-                "parties": PartySerializer(parties, many=True).data,
-                "user_branch": office.id if office else None,
-            }
-        )
+
+        data = {
+            "branches": CompanyOfficeSerializer(offices, many=True).data,
+            "cities": CitySerializer(cities, many=True).data,
+            "states": StateSerializer(states, many=True).data,
+            "parties": PartySerializer(parties, many=True).data,
+            "user_branch": office.id if office else None,
+        }
+        cache.set(cache_key, data, 300)  # Cache for 5 minutes
+        return Response(data)

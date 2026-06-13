@@ -1,7 +1,7 @@
 import uuid
 
 from django.db import transaction
-from django.db.models import Count, Sum
+from django.db.models import Count, Exists, OuterRef, Sum
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -32,7 +32,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         company = get_current_company()
         if not company:
             return Invoice.objects.none()
-        qs = Invoice.objects.filter(company=company)
+        qs = Invoice.objects.filter(company=company).select_related("office", "party").prefetch_related("lines")
         if not can_manage_company(self.request.user, company):
             office = get_current_office()
             if not office:
@@ -61,7 +61,9 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             if not active_office or office.id != active_office.id:
                 return Response({"error": "You can only generate invoices for your active office."}, status=status.HTTP_400_BAD_REQUEST)
 
-        shipments = Shipment.objects.filter(id__in=data["shipments"], company=company)
+        shipments = Shipment.objects.filter(id__in=data["shipments"], company=company).annotate(
+            is_billed=Exists(InvoiceLine.objects.filter(shipment=OuterRef("pk")))
+        )
         if shipments.count() != len(data["shipments"]):
             return Response({"error": "One or more shipments not found or invalid."}, status=status.HTTP_400_BAD_REQUEST)
         for shipment in shipments:
@@ -69,7 +71,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 return Response({"error": f"Shipment {shipment.lr_no} is not TBB and cannot be invoiced."}, status=status.HTTP_400_BAD_REQUEST)
             if not shipment_participates_at_office(shipment, office):
                 return Response({"error": f"Shipment {shipment.lr_no} does not participate in the selected billing office."}, status=status.HTTP_400_BAD_REQUEST)
-            if shipment.invoice_lines.exists():
+            if shipment.is_billed:
                 return Response({"error": f"Shipment {shipment.lr_no} is already invoiced."}, status=status.HTTP_400_BAD_REQUEST)
 
         total_amount = sum(s.final_freight for s in shipments)
@@ -112,7 +114,7 @@ class PaymentReceiptViewSet(viewsets.ModelViewSet):
         company = get_current_company()
         if not company:
             return PaymentReceipt.objects.none()
-        qs = PaymentReceipt.objects.filter(company=company)
+        qs = PaymentReceipt.objects.filter(company=company).select_related("office", "party")
         if not can_manage_company(self.request.user, company):
             office = get_current_office()
             if not office:
@@ -197,7 +199,7 @@ class LedgerEntryViewSet(viewsets.ReadOnlyModelViewSet):
         company = get_current_company()
         if not company:
             return LedgerEntry.objects.none()
-        qs = LedgerEntry.objects.filter(company=company)
+        qs = LedgerEntry.objects.filter(company=company).select_related("office", "party")
         if not can_manage_company(self.request.user, company):
             office = get_current_office()
             if not office:
@@ -215,7 +217,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         company = get_current_company()
         if not company:
             return Expense.objects.none()
-        qs = Expense.objects.filter(company=company)
+        qs = Expense.objects.filter(company=company).select_related("office")
         
         # Handle optional filters from query params
         date_param = self.request.query_params.get("date")

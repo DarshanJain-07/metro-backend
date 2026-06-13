@@ -3,7 +3,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import models, transaction
-from django.db.models import OuterRef, Subquery
+from django.db.models import Exists, OuterRef, Subquery
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django_filters.rest_framework import DjangoFilterBackend
@@ -105,6 +105,16 @@ class ShipmentViewSet(
             return ShipmentListSerializer
         return ShipmentSerializer
 
+    def with_list_annotations(self, qs):
+        latest_event = ShipmentEvent.unscoped_objects.filter(
+            shipment=OuterRef("pk")
+        ).order_by("-occurred_at", "-created_at")
+
+        return qs.annotate(
+            is_billed=Exists(InvoiceLine.objects.filter(shipment=OuterRef("pk"))),
+            latest_event_timestamp=Subquery(latest_event.values("occurred_at")[:1]),
+        )
+
     def get_queryset(self):
         qs = Shipment.unscoped_objects.filter(is_active=True).select_related(
             "company",
@@ -117,6 +127,9 @@ class ShipmentViewSet(
             "created_by",
             "updated_by",
         )
+        if self.action == "list":
+            qs = self.with_list_annotations(qs)
+
         if self.action in ["retrieve", "update", "partial_update"]:
             qs = qs.prefetch_related("line_items", "events")
         qs = self.apply_office_scope(qs)
@@ -405,6 +418,7 @@ class ShipmentViewSet(
         )
         if company:
             qs = qs.filter(company=company)
+        qs = self.with_list_annotations(qs)
         qs = qs.exclude(
             status__in=[Shipment.StatusChoices.DELIVERED, Shipment.StatusChoices.CANCELLED]
         )

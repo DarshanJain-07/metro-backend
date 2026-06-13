@@ -23,6 +23,49 @@ from core.serializers import (
 from core.viewsets import IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftDeleteMixin
 
 
+def materialize_global_offices_from_company_offices():
+    offices = CompanyOffice.unscoped_objects.filter(
+        is_active=True,
+        status=OfficeStatus.ACTIVE,
+        global_office__isnull=True,
+    ).select_related("company", "city")
+
+    for office in offices:
+        global_office = GlobalOffice.unscoped_objects.filter(
+            name__iexact=office.name,
+            city=office.city,
+        ).first()
+
+        if not global_office:
+            try:
+                global_office = GlobalOffice.unscoped_objects.create(
+                    name=office.name,
+                    city=office.city,
+                    owner_company=office.company,
+                    address=office.address,
+                    contact_name=office.contact_name,
+                    phone=office.phone,
+                    status=office.status,
+                    is_active=office.is_active,
+                )
+            except IntegrityError:
+                global_office = GlobalOffice.unscoped_objects.filter(
+                    name__iexact=office.name,
+                    city=office.city,
+                ).first()
+
+        if not global_office:
+            continue
+
+        update_fields = ["global_office", "updated_at"]
+        if not global_office.owner_company_id:
+            global_office.owner_company = office.company
+            global_office.save(update_fields=["owner_company", "updated_at"])
+
+        office.global_office = global_office
+        office.save(update_fields=update_fields)
+
+
 def company_scoped_queryset(queryset, user):
     if not user.is_authenticated:
         return queryset.none()
@@ -175,6 +218,9 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
 
     def get_queryset(self):
         config = self._get_config()
+        if self.kwargs.get("resource") == "global-offices":
+            materialize_global_offices_from_company_offices()
+
         model = config["model"]
         qs = model.unscoped_objects.all() if hasattr(model, "unscoped_objects") else model.objects.all()
         if config["select_related"]:

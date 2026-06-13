@@ -8,9 +8,13 @@ from core.models import City, Company, CompanyOffice, GlobalOffice, OfficeStatus
 
 class OfficeRegistryArchitectureTests(TestCase):
     def setUp(self):
+        self.client = APIClient()
         self.company = Company.objects.create(name="Metro Express")
+        self.other_company = Company.objects.create(name="Swift Carriers")
         self.state = State.objects.create(name="Maharashtra", code="MH")
         self.city = City.objects.create(name="Mumbai", state=self.state)
+        self.user = User.objects.create_user(username="metro_admin", password="pw", company=self.company)
+        UserMembership.objects.create(user=self.user, company=self.company, role=Role.CLIENT_SUPER_ADMIN)
 
     def test_company_office_is_copy_not_live_mirror(self):
         global_office = GlobalOffice.objects.create(
@@ -47,6 +51,30 @@ class OfficeRegistryArchitectureTests(TestCase):
 
         company_office.refresh_from_db()
         self.assertEqual(company_office.address, "Updated address")
+
+    def test_global_office_list_materializes_existing_company_offices(self):
+        office = CompanyOffice.objects.create(
+            company=self.other_company,
+            name="Swift Mumbai Hub",
+            city=self.city,
+            address="Dock Road",
+            phone="9999999999",
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(
+            reverse("master-list", kwargs={"resource": "global-offices"}),
+            {"include_inactive": "false"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        items = response.data.get("results", response.data)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "Swift Mumbai Hub")
+        self.assertEqual(items[0]["owner_company"], self.other_company.id)
+
+        office.refresh_from_db()
+        self.assertIsNotNone(office.global_office_id)
 
 
 class PartyMasterDataApiTests(TestCase):

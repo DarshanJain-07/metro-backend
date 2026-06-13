@@ -122,11 +122,18 @@ class ShipmentViewSet(
         qs = self.apply_office_scope(qs)
         if self.action == "list":
             requested_origin_office = self.request.query_params.get("origin_office")
+            requested_destination_office = self.request.query_params.get("destination_office")
+            scope = self.request.query_params.get("scope", "outgoing")
             office = get_current_office()
             if requested_origin_office:
                 qs = qs.filter(origin_office_id=requested_origin_office)
+            elif requested_destination_office:
+                qs = qs.filter(destination_office_id=requested_destination_office)
             elif office:
-                qs = qs.filter(origin_office=office)
+                if scope == "incoming":
+                    qs = qs.filter(destination_office=office)
+                elif scope != "all":
+                    qs = qs.filter(origin_office=office)
         return qs.distinct()
 
     def perform_create(self, serializer):

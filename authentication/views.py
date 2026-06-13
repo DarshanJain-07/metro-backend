@@ -63,10 +63,8 @@ class ChangePasswordView(generics.GenericAPIView):
             update_session_auth_hash(request, user)
 
             outstanding_tokens = OutstandingToken.objects.filter(user=user)
-            BlacklistedToken.objects.bulk_create(
-                [BlacklistedToken(token=t) for t in outstanding_tokens],
-                ignore_conflicts=True
-            )
+            for token in outstanding_tokens:
+                BlacklistedToken.objects.get_or_create(token=token)
 
             refresh = RefreshToken.for_user(user)
         
@@ -77,7 +75,7 @@ class ChangePasswordView(generics.GenericAPIView):
         }, status=status.HTTP_200_OK)
 
 class UserViewSet(viewsets.ModelViewSet):
-    queryset = User.objects.all()
+    queryset = User.objects.order_by("id")
     serializer_class = UserSerializer
     permission_classes = [UserManagementPermission]
 
@@ -86,7 +84,7 @@ class UserViewSet(viewsets.ModelViewSet):
             "memberships",
             "memberships__company",
             "memberships__office",
-        )
+        ).order_by("id")
         user = self.request.user
         if can_manage_company(user, None):
             return base_qs

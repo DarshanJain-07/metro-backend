@@ -7,7 +7,8 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from core.models import City, Company, CompanyOffice, Role, State, UserMembership
+from accounts.models import Invoice, InvoiceLine
+from core.models import City, Company, CompanyOffice, Party, Role, State, UserMembership
 from core.policies import can_view_shipment
 from shipments.models import RateCard, RateRule, Shipment, ShipmentEvent, ShipmentLineItem
 from shipments.services import ShipmentWorkflowService
@@ -83,6 +84,7 @@ class ShipmentLifecycleApiTests(TestCase):
         self.destination = CompanyOffice.objects.create(company=self.company, name="Delhi Office", city=self.city)
         self.transit = CompanyOffice.objects.create(company=self.company, name="Nagpur Transit", city=self.city)
         self.other_office = CompanyOffice.objects.create(company=self.other_company, name="Other Office", city=self.city)
+        self.party = Party.objects.create(company=self.company, name="Sender", phone="1234567890", city=self.city)
         self.booking_user = User.objects.create_user(username="booking_api", password="pw", company=self.company, office=self.origin)
         self.transit_user = User.objects.create_user(username="transit_api", password="pw", company=self.company, office=self.transit)
         self.branch_admin = User.objects.create_user(username="branch_admin_api", password="pw", company=self.company, office=self.origin)
@@ -261,6 +263,62 @@ class ShipmentLifecycleApiTests(TestCase):
         self.assertEqual(list_response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(create_response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(update_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_branch_admin_can_bill_selected_tbb_shipments(self):
+        shipment = self.make_shipment(
+            lr_no="LR-BILL-BRANCH",
+            basis=Shipment.BasisChoices.TBB,
+            payment_type=Shipment.PaymentTypeChoices.CREDIT,
+            freight=Decimal("100.00"),
+        )
+
+        self.client.force_authenticate(user=self.branch_admin)
+        response = self.client.post(
+            reverse("shipment-bill"),
+            {"shipment_ids": [shipment.id], "party": self.party.id, "office": self.origin.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Invoice.objects.count(), 1)
+        self.assertEqual(InvoiceLine.objects.filter(shipment=shipment).count(), 1)
+
+    def test_accountant_can_bill_selected_tbb_shipments(self):
+        shipment = self.make_shipment(
+            lr_no="LR-BILL-ACCOUNTANT",
+            basis=Shipment.BasisChoices.TBB,
+            payment_type=Shipment.PaymentTypeChoices.CREDIT,
+            freight=Decimal("100.00"),
+        )
+
+        self.client.force_authenticate(user=self.accountant)
+        response = self.client.post(
+            reverse("shipment-bill"),
+            {"shipment_ids": [shipment.id], "party": self.party.id, "office": self.origin.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(Invoice.objects.count(), 1)
+        self.assertEqual(InvoiceLine.objects.filter(shipment=shipment).count(), 1)
+
+    def test_booking_user_cannot_bill_selected_shipments(self):
+        shipment = self.make_shipment(
+            lr_no="LR-BILL-DENIED",
+            basis=Shipment.BasisChoices.TBB,
+            payment_type=Shipment.PaymentTypeChoices.CREDIT,
+            freight=Decimal("100.00"),
+        )
+
+        self.client.force_authenticate(user=self.booking_user)
+        response = self.client.post(
+            reverse("shipment-bill"),
+            {"shipment_ids": [shipment.id], "party": self.party.id, "office": self.origin.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(Invoice.objects.count(), 0)
 
     def test_book_rejects_already_booked_created_shipment_without_duplicate_event(self):
         self.client.force_authenticate(user=self.booking_user)

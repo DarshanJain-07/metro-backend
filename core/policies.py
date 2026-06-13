@@ -26,6 +26,7 @@ ROLE_ACTIONS = {
         "shipment:deliver",
         "shipment:cancel",
         "shipment:view",
+        "billing:create",
         "billing:view",
         "reports:view",
         "users:manage",

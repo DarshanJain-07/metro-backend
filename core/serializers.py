@@ -80,7 +80,7 @@ class OfficeImportSerializer(serializers.Serializer):
     office_type = serializers.ChoiceField(choices=CompanyOffice.OfficeType.choices, required=False)
 
 
-class BulkOfficeImportSerializer(serializers.Serializer):
+class OwnerCompanyOfficeImportSerializer(serializers.Serializer):
     owner_company = serializers.CharField()
     office_type = serializers.ChoiceField(choices=CompanyOffice.OfficeType.choices, required=False)
 

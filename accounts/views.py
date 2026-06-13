@@ -83,17 +83,13 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             due_date=data["due_date"],
             total_amount=total_amount,
         )
-        InvoiceLine.objects.bulk_create(
-            [
-                InvoiceLine(
-                    invoice=invoice,
-                    shipment=shipment,
-                    description=f"Freight charges for LR {shipment.lr_no}",
-                    amount=shipment.final_freight,
-                )
-                for shipment in shipments
-            ]
-        )
+        for shipment in shipments:
+            InvoiceLine.objects.create(
+                invoice=invoice,
+                shipment=shipment,
+                description=f"Freight charges for LR {shipment.lr_no}",
+                amount=shipment.final_freight,
+            )
         LedgerEntry.objects.create(
             company=company,
             office=office,
@@ -252,9 +248,10 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         
         if is_many:
-            expenses = [Expense(**item, company=company) for item in serializer.validated_data]
-            Expense.objects.bulk_create(expenses)
-            return Response({"status": "success", "count": len(expenses)}, status=status.HTTP_201_CREATED)
+            created_expenses = []
+            for expense_data in serializer.validated_data:
+                created_expenses.append(Expense.objects.create(**expense_data, company=company))
+            return Response({"status": "success", "count": len(created_expenses)}, status=status.HTTP_201_CREATED)
         else:
             serializer.save(company=company)
             return Response(serializer.data, status=status.HTTP_201_CREATED)

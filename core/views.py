@@ -12,11 +12,11 @@ from core.models import City, CompanyOffice, GlobalOffice, OfficeStatus, Party, 
 from core.policies import active_office_ids, can_manage_company, has_role
 from core.request_context import get_current_company, get_current_office
 from core.serializers import (
-    BulkOfficeImportSerializer,
     CitySerializer,
     CompanyOfficeSerializer,
     GlobalOfficeSerializer,
     OfficeImportSerializer,
+    OwnerCompanyOfficeImportSerializer,
     PartySerializer,
     StateSerializer,
 )
@@ -198,8 +198,8 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
         else:
             serializer.save(**save_kwargs)
 
-    @action(detail=False, methods=["post"], url_path="bulk-create")
-    def bulk_create(self, request, resource=None):
+    @action(detail=False, methods=["post"], url_path="import-rows")
+    def import_rows(self, request, resource=None):
         config = self._get_config()
         rows = request.data.get("rows") if isinstance(request.data, dict) else request.data
         if not isinstance(rows, list):
@@ -268,14 +268,14 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
         office.save()
         return Response(CompanyOfficeSerializer(office).data, status=status.HTTP_201_CREATED)
 
-    @action(detail=False, methods=["post"], url_path="bulk-import")
-    def bulk_import_offices(self, request, resource=None):
+    @action(detail=False, methods=["post"], url_path="import-company-offices")
+    def import_company_offices(self, request, resource=None):
         if resource != "offices":
             raise Http404("Resource not found")
         company = get_current_company()
         if not company:
             raise serializers.ValidationError({"detail": "Active company context required."})
-        serializer = BulkOfficeImportSerializer(data=request.data)
+        serializer = OwnerCompanyOfficeImportSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         offices = GlobalOffice.objects.filter(
             owner_company_id=serializer.validated_data["owner_company"],

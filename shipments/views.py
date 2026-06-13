@@ -1,15 +1,22 @@
+import uuid
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import models
+from django.db import models, transaction
 from django.db.models import OuterRef, Subquery
+from django.utils import timezone
+from django.utils.dateparse import parse_date
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.response import Response
 
-from core.policies import can, can_manage_company
+from accounts.models import Invoice, InvoiceLine, LedgerEntry
+from accounts.permissions import AccountantPermission
+from accounts.serializers import InvoiceSerializer
+from core.models import CompanyOffice, Party
+from core.policies import can, can_manage_company, shipment_participates_at_office
 from core.request_context import get_current_company, get_current_office
 from core.viewsets import IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftDeleteMixin, TenantOfficeScopedQuerysetMixin
 from .admin_serializers import OfficeRatePolicySerializer, RateCardSerializer, RateRuleSerializer
@@ -174,6 +181,114 @@ class ShipmentViewSet(
                 "rule_id": rule.id,
             }
         )
+
+    @action(detail=False, methods=["post"], url_path="bill", url_name="bill", permission_classes=[AccountantPermission])
+    @transaction.atomic
+    def bill_selected_shipments(self, request):
+        company = get_current_company() or getattr(request.user, "company", None)
+        if not company:
+            return Response({"detail": "Company context required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        shipment_ids = request.data.get("shipment_ids") or request.data.get("shipments") or []
+        if not isinstance(shipment_ids, list) or not shipment_ids:
+            return Response({"detail": "shipment_ids must be a non-empty list."}, status=status.HTTP_400_BAD_REQUEST)
+
+        due_date = timezone.now().date()
+        if request.data.get("due_date"):
+            due_date = parse_date(str(request.data["due_date"]))
+            if not due_date:
+                return Response({"detail": "due_date must be in YYYY-MM-DD format."}, status=status.HTTP_400_BAD_REQUEST)
+
+        office = get_current_office()
+        office_id = request.data.get("office")
+        if office_id:
+            try:
+                office = CompanyOffice.objects.get(id=office_id, company=company)
+            except CompanyOffice.DoesNotExist:
+                return Response({"detail": "Invalid office."}, status=status.HTTP_400_BAD_REQUEST)
+
+        shipments = list(
+            Shipment.unscoped_objects.filter(id__in=shipment_ids, company=company)
+            .select_related("origin_office", "destination_office")
+            .prefetch_related("invoice_lines")
+        )
+        if len(shipments) != len(set(shipment_ids)):
+            return Response({"detail": "One or more shipments not found or invalid."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not office:
+            origin_office_ids = {shipment.origin_office_id for shipment in shipments}
+            if len(origin_office_ids) != 1:
+                return Response({"detail": "office is required when selected shipments have multiple origin offices."}, status=status.HTTP_400_BAD_REQUEST)
+            office = shipments[0].origin_office
+
+        if not can_manage_company(request.user, company):
+            active_office = get_current_office()
+            if not active_office or office.id != active_office.id:
+                return Response({"detail": "You can only generate bills for your active office."}, status=status.HTTP_400_BAD_REQUEST)
+
+        explicit_party = None
+        if request.data.get("party"):
+            explicit_party = Party.objects.filter(id=request.data["party"], company=company).first()
+            if not explicit_party:
+                return Response({"detail": "Invalid party."}, status=status.HTTP_400_BAD_REQUEST)
+
+        invoices_by_party = {}
+        for shipment in shipments:
+            if shipment.basis != Shipment.BasisChoices.TBB:
+                return Response({"detail": f"Shipment {shipment.lr_no} is not TBB and cannot be billed."}, status=status.HTTP_400_BAD_REQUEST)
+            if shipment.invoice_lines.exists():
+                return Response({"detail": f"Shipment {shipment.lr_no} is already billed."}, status=status.HTTP_400_BAD_REQUEST)
+            if not shipment_participates_at_office(shipment, office):
+                return Response({"detail": f"Shipment {shipment.lr_no} does not participate in the billing office."}, status=status.HTTP_400_BAD_REQUEST)
+
+            party = explicit_party or self._infer_billing_party(shipment, company)
+            if not party:
+                return Response({"detail": f"Billing party could not be resolved for shipment {shipment.lr_no}."}, status=status.HTTP_400_BAD_REQUEST)
+            invoices_by_party.setdefault(party, []).append(shipment)
+
+        invoices = []
+        for party, party_shipments in invoices_by_party.items():
+            total_amount = sum(shipment.final_freight for shipment in party_shipments)
+            invoice = Invoice.objects.create(
+                company=company,
+                office=office,
+                party=party,
+                invoice_no=f"INV-{uuid.uuid4().hex[:8].upper()}",
+                status=Invoice.Status.SENT,
+                invoice_date=timezone.now().date(),
+                due_date=due_date,
+                total_amount=total_amount,
+            )
+            for shipment in party_shipments:
+                InvoiceLine.objects.create(
+                    invoice=invoice,
+                    shipment=shipment,
+                    description=f"Freight charges for LR {shipment.lr_no}",
+                    amount=shipment.final_freight,
+                )
+            LedgerEntry.objects.create(
+                company=company,
+                office=office,
+                party=party,
+                entry_type=LedgerEntry.EntryType.DEBIT,
+                reference_type=LedgerEntry.ReferenceType.INVOICE,
+                reference_id=invoice.id,
+                debit=total_amount,
+                entry_date=invoice.invoice_date,
+            )
+            invoices.append(invoice)
+
+        return Response({"invoices": InvoiceSerializer(invoices, many=True).data}, status=status.HTTP_201_CREATED)
+
+    def _infer_billing_party(self, shipment, company):
+        names = [shipment.gst_party, shipment.consignor_name, shipment.consignee_name]
+        for name in names:
+            if not name:
+                continue
+            party = Party.objects.filter(company=company, name=name).first()
+            if party:
+                return party
+        return None
 
     @action(detail=False, methods=["post"])
     def preview(self, request):

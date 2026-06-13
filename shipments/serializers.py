@@ -2,6 +2,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from rest_framework import serializers
 
+from core.models import CompanyOffice
 from core.policies import (
     can_assign_delivery,
     can_cancel_shipment,
@@ -261,12 +262,17 @@ class ShipmentSerializer(serializers.ModelSerializer):
             self.context["line_item_instances_by_id"] = {item.id: item for item in self.instance.line_items.all()}
         else:
             self.context.pop("line_item_instances_by_id", None)
-            if "origin_office" not in data:
+            origin_office_id = data.get("origin_office")
+            if not origin_office_id:
                 office = get_current_office()
                 if office:
                     data["origin_office"] = office.id
-                    if office.city_id:
+                    if office.city_id and "from_city" not in data:
                         data["from_city"] = office.city_id
+            elif "from_city" not in data:
+                office = CompanyOffice.objects.filter(pk=origin_office_id).only("city_id").first()
+                if office and office.city_id:
+                    data["from_city"] = office.city_id
         if "gst_number" in data and data["gst_number"]:
             data["gst_number"] = str(data["gst_number"]).upper().strip()
         for phone_field in ["consignor_phone", "consignee_phone"]:

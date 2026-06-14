@@ -1,6 +1,8 @@
 from django.core.exceptions import ValidationError
 
-from core.models import Role, UserMembership
+from django.db import models
+
+from core.models import MasterScope, Role, UserMembership
 
 
 COMPANY_ROLES = (Role.PLATFORM_ADMIN, Role.CLIENT_SUPER_ADMIN)
@@ -168,7 +170,39 @@ def can(user, action, company=None, office=None, resource=None):
 
 
 def can_manage_master_data(user, company):
-    return can_manage_company(user, company)
+    if can_manage_company(user, company):
+        return True
+    return bool(company and can(user, "office:manage", company=company))
+
+
+def active_master_scope(role=None, office=None):
+    if office and role in OFFICE_ROLES:
+        return MasterScope.BRANCH, str(office.id)
+    return MasterScope.COMPANY, None
+
+
+def assign_master_scope(instance, role=None, office=None):
+    if not hasattr(instance, "scope_type"):
+        return instance
+    scope_type, scope_id = active_master_scope(role=role, office=office)
+    instance.scope_type = scope_type
+    instance.scope_id = scope_id
+    return instance
+
+
+def visible_master_scope_filter(user, company):
+    if not company:
+        return models.Q(pk__in=[])
+    if user and (user.is_superuser or has_role(user, roles=[Role.PLATFORM_ADMIN])):
+        return models.Q()
+    if has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN]):
+        return models.Q(scope_type=MasterScope.COMPANY)
+
+    branch_scope_ids = [str(office_id) for office_id in active_office_ids(user, company)]
+    return models.Q(scope_type=MasterScope.COMPANY) | models.Q(
+        scope_type=MasterScope.BRANCH,
+        scope_id__in=branch_scope_ids,
+    )
 
 
 def can_manage_office_master_data(user, office):

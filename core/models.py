@@ -140,6 +140,11 @@ class OfficeStatus(models.TextChoices):
     ARCHIVED = "ARCHIVED", _("Archived")
 
 
+class MasterScope(models.TextChoices):
+    COMPANY = "COMPANY", _("Company")
+    BRANCH = "BRANCH", _("Branch")
+
+
 class GlobalOffice(AuditBaseModel):
     name = models.CharField(max_length=255)
     city = models.ForeignKey(City, related_name="global_offices", on_delete=models.PROTECT)
@@ -205,13 +210,31 @@ class CompanyOffice(AuditBaseModel):
     )
     status = models.CharField(max_length=20, choices=OfficeStatus.choices, default=OfficeStatus.ACTIVE)
     notes = models.TextField(blank=True, null=True)
+    scope_type = models.CharField(max_length=30, choices=MasterScope.choices, default=MasterScope.COMPANY)
+    scope_id = models.CharField(max_length=26, blank=True, null=True)
 
     class Meta:
         verbose_name = "Company Office"
         verbose_name_plural = "Company Offices"
         ordering = ["name"]
         constraints = [
-            models.UniqueConstraint(fields=["company", "name"], name="unique_office_per_company"),
+            models.UniqueConstraint(
+                fields=["company", "name", "scope_type"],
+                condition=models.Q(scope_type=MasterScope.COMPANY),
+                name="unique_company_scope_office",
+            ),
+            models.UniqueConstraint(
+                fields=["company", "name", "scope_type", "scope_id"],
+                condition=models.Q(scope_type=MasterScope.BRANCH),
+                name="unique_branch_scope_office",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(scope_type=MasterScope.COMPANY, scope_id__isnull=True)
+                    | ~models.Q(scope_type=MasterScope.COMPANY) & models.Q(scope_id__isnull=False)
+                ),
+                name="office_scope_id_matches_type",
+            ),
         ]
         indexes = [
             GinIndex(name="company_office_name_trgm_idx", fields=["name"], opclasses=["gin_trgm_ops"]),
@@ -274,7 +297,9 @@ class UserMembership(AuditBaseModel):
         constraints = [
             models.UniqueConstraint(fields=["user", "company", "office", "role"], name="unique_user_membership"),
             models.CheckConstraint(
-                condition=~models.Q(role__in=[Role.BRANCH_ADMIN, Role.BOOKING_USER, Role.DELIVERY_USER])
+                condition=~models.Q(
+                    role__in=[Role.BRANCH_ADMIN, Role.BOOKING_USER, Role.DELIVERY_USER, Role.ACCOUNTANT, Role.VIEWER]
+                )
                 | models.Q(office__isnull=False),
                 name="office_required_for_operational_roles",
             ),
@@ -305,6 +330,8 @@ class Party(AuditBaseModel):
             )
         ],
     )
+    scope_type = models.CharField(max_length=30, choices=MasterScope.choices, default=MasterScope.COMPANY)
+    scope_id = models.CharField(max_length=26, blank=True, null=True)
 
     class Meta:
         verbose_name_plural = "Parties"
@@ -314,7 +341,25 @@ class Party(AuditBaseModel):
                 models.functions.Lower("name"),
                 "phone",
                 "company",
-                name="unique_party_per_company",
+                "scope_type",
+                condition=models.Q(scope_type=MasterScope.COMPANY),
+                name="unique_company_scope_party",
+            ),
+            models.UniqueConstraint(
+                models.functions.Lower("name"),
+                "phone",
+                "company",
+                "scope_type",
+                "scope_id",
+                condition=models.Q(scope_type=MasterScope.BRANCH),
+                name="unique_branch_scope_party",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(scope_type=MasterScope.COMPANY, scope_id__isnull=True)
+                    | ~models.Q(scope_type=MasterScope.COMPANY) & models.Q(scope_id__isnull=False)
+                ),
+                name="party_scope_id_matches_type",
             )
         ]
 

@@ -112,7 +112,32 @@ def reset_current_office(token):
 
 
 def get_current_role():
-    return _current_role.get()
+    role = _current_role.get()
+    if role is not None:
+        return role
+
+    request = get_current_request()
+    if request:
+        role = getattr(request, "current_role", None)
+        if role:
+            return role
+
+    user = get_current_user()
+    if user and getattr(user, "is_authenticated", False):
+        from core.models import UserMembership
+
+        company = get_current_company(user)
+        office = get_current_office(user)
+        memberships = UserMembership.unscoped_objects.filter(user=user, is_active=True)
+        if company:
+            memberships = memberships.filter(company=company)
+        if office:
+            memberships = memberships.filter(office=office)
+        role_values = list(memberships.values_list("role", flat=True).distinct())
+        if len(role_values) == 1:
+            return role_values[0]
+
+    return None
 
 
 def set_current_role(role):

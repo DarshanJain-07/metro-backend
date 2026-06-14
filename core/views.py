@@ -8,9 +8,16 @@ from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.models import City, CompanyOffice, GlobalOffice, OfficeStatus, Party, Role, State
-from core.policies import active_office_ids, can_manage_company, has_role
-from core.request_context import get_current_company, get_current_office
+from core.models import City, CompanyOffice, GlobalOffice, MasterScope, OfficeStatus, Party, Role, State
+from core.policies import (
+    active_office_ids,
+    assign_master_scope,
+    active_master_scope,
+    can_manage_master_data,
+    has_role,
+    visible_master_scope_filter,
+)
+from core.request_context import get_current_company, get_current_office, get_current_role
 from core.serializers import (
     CitySerializer,
     CompanyOfficeSerializer,
@@ -28,6 +35,7 @@ def materialize_global_offices_from_company_offices():
         is_active=True,
         status=OfficeStatus.ACTIVE,
         global_office__isnull=True,
+        scope_type=MasterScope.COMPANY,
     ).select_related("company", "city")
 
     for office in offices:
@@ -77,7 +85,9 @@ def company_scoped_queryset(queryset, user):
         return queryset.none()
 
     qs = queryset.filter(company=company)
-    if not has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN]):
+    if hasattr(queryset.model, "scope_type"):
+        qs = qs.filter(visible_master_scope_filter(user, company))
+    elif not has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN]):
         office_ids = active_office_ids(user, company)
         if hasattr(queryset.model, "office"):
             qs = qs.filter(models.Q(office__in=office_ids) | models.Q(office__isnull=True))
@@ -102,7 +112,7 @@ class ActionModelPermission(BasePermission):
             return False
 
         company = get_current_company()
-        return bool(company and can_manage_company(request.user, company))
+        return bool(company and can_manage_master_data(request.user, company))
 
 
 class DashboardStatsView(APIView):
@@ -240,6 +250,12 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
             company = get_current_company()
             if not company:
                 raise serializers.ValidationError({"detail": "Active company context required."})
+            if hasattr(config["model"], "scope_type"):
+                scope_type, scope_id = active_master_scope(
+                    role=get_current_role(),
+                    office=get_current_office(self.request.user),
+                )
+                save_kwargs.update({"scope_type": scope_type, "scope_id": scope_id})
             serializer.save(company=company, **save_kwargs)
         else:
             serializer.save(**save_kwargs)
@@ -271,6 +287,12 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
             if not company:
                 raise serializers.ValidationError({"detail": "Active company context required."})
             save_kwargs["company"] = company
+            if hasattr(config["model"], "scope_type"):
+                scope_type, scope_id = active_master_scope(
+                    role=get_current_role(),
+                    office=get_current_office(request.user),
+                )
+                save_kwargs.update({"scope_type": scope_type, "scope_id": scope_id})
 
         instances = []
         try:
@@ -311,6 +333,7 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
             global_office,
             office_type=serializer.validated_data.get("office_type"),
         )
+        assign_master_scope(office, role=get_current_role(), office=get_current_office(request.user))
         office.save()
         return Response(CompanyOfficeSerializer(office).data, status=status.HTTP_201_CREATED)
 
@@ -336,6 +359,7 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
                 global_office,
                 office_type=serializer.validated_data.get("office_type"),
             )
+            assign_master_scope(office, role=get_current_role(), office=get_current_office(request.user))
             office.save()
             created.append(office)
         return Response(CompanyOfficeSerializer(created, many=True).data, status=status.HTTP_201_CREATED)

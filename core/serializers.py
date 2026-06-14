@@ -68,11 +68,23 @@ class CompanyOfficeSerializer(serializers.ModelSerializer):
             "phone",
             "status",
             "notes",
+            "scope_type",
+            "scope_id",
             "is_active",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "company", "global_office_name", "city_name", "state_code", "created_at", "updated_at")
+        read_only_fields = (
+            "id",
+            "company",
+            "global_office_name",
+            "city_name",
+            "state_code",
+            "scope_type",
+            "scope_id",
+            "created_at",
+            "updated_at",
+        )
 
 
 class OfficeImportSerializer(serializers.Serializer):
@@ -100,8 +112,10 @@ class PartySerializer(serializers.ModelSerializer):
             "city_name",
             "state_code",
             "gst_number",
+            "scope_type",
+            "scope_id",
             "is_active",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "city_name", "state_code", "created_at", "updated_at")
+        read_only_fields = ("id", "city_name", "state_code", "scope_type", "scope_id", "created_at", "updated_at")

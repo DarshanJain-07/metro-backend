@@ -9,10 +9,17 @@ from django.db import transaction
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from rest_framework_simplejwt.tokens import RefreshToken
-from .serializers import UserSerializer, ChangePasswordSerializer, UserMembershipSerializer
+from .serializers import (
+    ChangePasswordSerializer,
+    CompanyRolePermissionOverrideSerializer,
+    PermissionCatalogSerializer,
+    UserMembershipSerializer,
+    UserSerializer,
+    role_template_payload,
+)
 from .permissions import UserManagementPermission
-from core.models import UserMembership
-from core.policies import can_manage_company
+from core.models import CompanyRolePermissionOverride, PermissionCatalog, Role, UserMembership
+from core.policies import can, can_manage_company, effective_role_grants, seed_role_templates
 from core.request_context import get_current_company
 
 User = get_user_model()
@@ -119,3 +126,72 @@ class UserMembershipViewSet(viewsets.ModelViewSet):
             from rest_framework import serializers as drf_serializers
             raise drf_serializers.ValidationError({"user": "User is required."})
         serializer.save(company=company)
+
+
+class RolePermissionAdminPermission(IsAuthenticated):
+    def has_permission(self, request, view):
+        if not super().has_permission(request, view):
+            return False
+        if request.user.is_superuser:
+            return True
+        company = get_current_company()
+        return bool(company and can(request.user, "roles:manage", company=company))
+
+
+class PermissionCatalogViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = PermissionCatalogSerializer
+    permission_classes = [RolePermissionAdminPermission]
+    queryset = PermissionCatalog.objects.filter(is_active=True).order_by("group", "code")
+
+    def get_queryset(self):
+        seed_role_templates()
+        return super().get_queryset()
+
+
+class RoleTemplateViewSet(viewsets.ViewSet):
+    permission_classes = [RolePermissionAdminPermission]
+
+    def list(self, request):
+        seed_role_templates()
+        roles = [role for role, _label in Role.choices if role != Role.PLATFORM_ADMIN]
+        return Response([role_template_payload(role) for role in roles])
+
+
+class CompanyRolePermissionViewSet(viewsets.ViewSet):
+    permission_classes = [RolePermissionAdminPermission]
+
+    def list(self, request):
+        seed_role_templates()
+        company = get_current_company()
+        role = request.query_params.get("role")
+        roles = [role] if role else [item for item, _label in Role.choices if item != Role.PLATFORM_ADMIN]
+        payload = []
+        for role_name in roles:
+            grants = effective_role_grants(company, role_name)
+            payload.append(
+                {
+                    "role": role_name,
+                    "permissions": [
+                        {"code": code, "scope": scope}
+                        for code, scope in sorted(grants.items())
+                    ],
+                }
+            )
+        return Response(payload)
+
+
+class CompanyRolePermissionOverrideViewSet(viewsets.ModelViewSet):
+    serializer_class = CompanyRolePermissionOverrideSerializer
+    permission_classes = [RolePermissionAdminPermission]
+    http_method_names = ["get", "post", "put", "patch", "delete", "head", "options"]
+
+    def get_queryset(self):
+        seed_role_templates()
+        company = get_current_company()
+        if not company:
+            return CompanyRolePermissionOverride.objects.none()
+        qs = CompanyRolePermissionOverride.objects.filter(company=company).select_related("permission")
+        role = self.request.query_params.get("role")
+        if role:
+            qs = qs.filter(role=role)
+        return qs

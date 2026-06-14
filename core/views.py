@@ -13,7 +13,7 @@ from core.policies import (
     active_office_ids,
     assign_master_scope,
     active_master_scope,
-    can_manage_master_data,
+    can,
     has_role,
     visible_master_scope_filter,
 )
@@ -87,7 +87,7 @@ def company_scoped_queryset(queryset, user):
     qs = queryset.filter(company=company)
     if hasattr(queryset.model, "scope_type"):
         qs = qs.filter(visible_master_scope_filter(user, company))
-    elif not has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN]):
+    elif not has_role(user, company=company, roles=[Role.SUPER_ADMIN]):
         office_ids = active_office_ids(user, company)
         if hasattr(queryset.model, "office"):
             qs = qs.filter(models.Q(office__in=office_ids) | models.Q(office__isnull=True))
@@ -95,6 +95,19 @@ def company_scoped_queryset(queryset, user):
 
 
 class ActionModelPermission(BasePermission):
+    action_permissions = {
+        "list": "master:view",
+        "retrieve": "master:view",
+        "create": "master:create",
+        "update": "master:edit",
+        "partial_update": "master:edit",
+        "destroy": "master:delete",
+        "import_rows": "master:import",
+        "import_office": "master:import",
+        "import_company_offices": "master:import",
+        "refresh_from_global": "master:edit",
+    }
+
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
@@ -102,17 +115,18 @@ class ActionModelPermission(BasePermission):
             return True
 
         action_name = getattr(view, "action", None)
-        if action_name in ["list", "retrieve"]:
-            return True
+        required_permission = self.action_permissions.get(action_name)
+        if not required_permission:
+            return False
 
         config = getattr(view, "_get_config", lambda: None)()
         if not config:
             return True
-        if not config.get("company_scoped"):
+        if not config.get("company_scoped") and required_permission != "master:view":
             return False
 
         company = get_current_company()
-        return bool(company and can_manage_master_data(request.user, company))
+        return can(request.user, required_permission, company=company, office=get_current_office(request.user))
 
 
 class DashboardStatsView(APIView):
@@ -140,7 +154,7 @@ class DashboardStatsView(APIView):
             ).distinct()
             invoices = invoices.filter(office_id=office_id)
             payments = payments.filter(office_id=office_id)
-        elif not has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN, Role.PLATFORM_ADMIN]):
+        elif not has_role(user, company=company, roles=[Role.SUPER_ADMIN, Role.PLATFORM_ADMIN]):
             office_ids = active_office_ids(user, company)
             shipments = shipments.filter(
                 models.Q(origin_office_id__in=office_ids)

@@ -94,7 +94,7 @@ class ShipmentLifecycleApiTests(TestCase):
         UserMembership.objects.create(user=self.transit_user, company=self.company, office=self.transit, role=Role.DELIVERY_USER)
         UserMembership.objects.create(user=self.branch_admin, company=self.company, office=self.origin, role=Role.BRANCH_ADMIN)
         UserMembership.objects.create(user=self.accountant, company=self.company, office=self.origin, role=Role.ACCOUNTANT)
-        UserMembership.objects.create(user=self.admin_user, company=self.company, role=Role.CLIENT_SUPER_ADMIN)
+        UserMembership.objects.create(user=self.admin_user, company=self.company, role=Role.SUPER_ADMIN)
 
     def shipment_payload(self):
         return {

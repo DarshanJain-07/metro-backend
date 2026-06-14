@@ -23,7 +23,7 @@ def get_available_shipment_actions(user, shipment):
     office = get_current_office()
     actions = []
     if can_edit_shipment(user, shipment):
-        actions.append("shipment:update")
+        actions.append("shipment:edit")
     is_closed = shipment.status in [
         Shipment.StatusChoices.DELIVERED,
         Shipment.StatusChoices.CANCELLED,
@@ -37,15 +37,15 @@ def get_available_shipment_actions(user, shipment):
     ):
         actions.append("shipment:receive")
     if shipment.status == Shipment.StatusChoices.RECEIVED and can_assign_delivery(user, shipment):
-        actions.append("shipment:assign_delivery")
+        actions.append("shipment:receive")
     if (
         shipment.status in [Shipment.StatusChoices.RECEIVED, Shipment.StatusChoices.OUT_FOR_DELIVERY]
         and can_mark_delivered(user, shipment)
     ):
-        actions.append("shipment:deliver")
+        actions.append("shipment:receive")
     if shipment.status in [Shipment.StatusChoices.DRAFT, Shipment.StatusChoices.BOOKED] and can_cancel_shipment(user, shipment):
-        actions.append("shipment:cancel")
-    return actions
+        actions.append("shipment:edit")
+    return sorted(set(actions))
 
 
 class ProofOfDeliverySerializer(serializers.ModelSerializer):

@@ -3,8 +3,15 @@ import django.contrib.auth.password_validation as validators
 from django.core.exceptions import ValidationError
 from rest_framework import serializers
 
-from core.models import CompanyOffice, Role, UserMembership
-from core.policies import ROLE_ACTIONS
+from core.models import (
+    CompanyRolePermissionOverride,
+    CompanyOffice,
+    PermissionCatalog,
+    PermissionScope,
+    Role,
+    UserMembership,
+)
+from core.policies import effective_membership_grants, effective_permissions_for_user, role_template_revision, template_role_grants
 from core.request_context import get_current_company
 
 User = get_user_model()
@@ -21,15 +28,34 @@ class UserMembershipSerializer(serializers.ModelSerializer):
     )
     branch_name = serializers.ReadOnlyField(source="office.name", default=None)
     permissions = serializers.SerializerMethodField()
+    scoped_permissions = serializers.SerializerMethodField()
 
     class Meta:
         model = UserMembership
-        fields = ("id", "user", "company", "company_name", "office", "office_name", "branch", "branch_name", "role", "permissions")
+        fields = (
+            "id",
+            "user",
+            "company",
+            "company_name",
+            "office",
+            "office_name",
+            "branch",
+            "branch_name",
+            "role",
+            "permissions",
+            "scoped_permissions",
+        )
         read_only_fields = ("company",)
         extra_kwargs = {"user": {"required": False}}
 
     def get_permissions(self, obj):
-        return sorted(ROLE_ACTIONS.get(obj.role, set()))
+        return sorted(effective_membership_grants(obj).keys())
+
+    def get_scoped_permissions(self, obj):
+        return [
+            {"code": code, "scope": scope}
+            for code, scope in sorted(effective_membership_grants(obj).items())
+        ]
 
     def validate(self, data):
         company = get_current_company()
@@ -40,7 +66,7 @@ class UserMembershipSerializer(serializers.ModelSerializer):
         office_roles = {Role.BRANCH_ADMIN, Role.BOOKING_USER, Role.DELIVERY_USER, Role.ACCOUNTANT, Role.VIEWER}
         if role in office_roles and not office:
             raise serializers.ValidationError({"office": "Office is required for this role."})
-        if role in (Role.PLATFORM_ADMIN, Role.CLIENT_SUPER_ADMIN) and office:
+        if role in (Role.PLATFORM_ADMIN, Role.SUPER_ADMIN) and office:
             raise serializers.ValidationError({"office": "Company-level roles must not include an office."})
         if office and office.company != company:
             raise serializers.ValidationError({"office": "Office does not belong to the active company."})
@@ -54,6 +80,7 @@ class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False, allow_blank=False)
     membership_inputs = UserMembershipSerializer(many=True, write_only=True, required=False)
     permissions = serializers.SerializerMethodField()
+    scoped_permissions = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -71,18 +98,29 @@ class UserSerializer(serializers.ModelSerializer):
             "memberships",
             "membership_inputs",
             "permissions",
+            "scoped_permissions",
         )
-        read_only_fields = ("id", "is_superuser", "is_owner", "company_name", "office_name", "memberships", "permissions")
+        read_only_fields = (
+            "id",
+            "is_superuser",
+            "is_owner",
+            "company_name",
+            "office_name",
+            "memberships",
+            "permissions",
+            "scoped_permissions",
+        )
 
     def get_permissions(self, obj):
         if obj.is_superuser:
             return ["*"]
-        permissions = set()
-        memberships = obj.memberships.all()
-        for membership in memberships:
-            if membership.is_active:
-                permissions.update(ROLE_ACTIONS.get(membership.role, set()))
-        return sorted(permissions)
+        return sorted(effective_permissions_for_user(obj).keys())
+
+    def get_scoped_permissions(self, obj):
+        return [
+            {"code": code, "scope": scope}
+            for code, scope in sorted(effective_permissions_for_user(obj).items())
+        ]
 
     def validate(self, data):
         company = get_current_company()
@@ -141,3 +179,84 @@ class ChangePasswordSerializer(serializers.Serializer):
         if data["old_password"] == data["new_password"]:
             raise serializers.ValidationError({"new_password": "New password cannot be the same as the old password."})
         return data
+
+
+class PermissionCatalogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PermissionCatalog
+        fields = ("id", "code", "name", "group", "description", "is_active")
+
+
+class RoleTemplateSummarySerializer(serializers.Serializer):
+    role = serializers.ChoiceField(choices=Role.choices)
+    name = serializers.CharField()
+    revision = serializers.IntegerField()
+    default_permissions = serializers.ListField()
+
+
+class CompanyRolePermissionOverrideSerializer(serializers.ModelSerializer):
+    permission_code = serializers.SlugRelatedField(
+        source="permission",
+        slug_field="code",
+        queryset=PermissionCatalog.objects.filter(is_active=True),
+        write_only=True,
+    )
+    code = serializers.ReadOnlyField(source="permission.code")
+    name = serializers.ReadOnlyField(source="permission.name")
+    group = serializers.ReadOnlyField(source="permission.group")
+
+    class Meta:
+        model = CompanyRolePermissionOverride
+        fields = (
+            "id",
+            "role",
+            "permission_code",
+            "code",
+            "name",
+            "group",
+            "enabled",
+            "scope",
+            "based_on_template_revision",
+        )
+        read_only_fields = ("id", "code", "name", "group")
+
+    def validate_role(self, value):
+        if value == Role.PLATFORM_ADMIN:
+            raise serializers.ValidationError("Platform admin permissions are managed globally.")
+        return value
+
+    def validate_scope(self, value):
+        if value not in PermissionScope.values:
+            raise serializers.ValidationError("Invalid scope.")
+        return value
+
+    def create(self, validated_data):
+        company = get_current_company()
+        if not company:
+            raise serializers.ValidationError({"company": "Active company context required."})
+        validated_data["company"] = company
+        validated_data.setdefault("based_on_template_revision", role_template_revision(validated_data["role"]))
+        obj, _ = CompanyRolePermissionOverride.objects.update_or_create(
+            company=company,
+            role=validated_data["role"],
+            permission=validated_data["permission"],
+            defaults={
+                "enabled": validated_data.get("enabled", True),
+                "scope": validated_data.get("scope", PermissionScope.BRANCH),
+                "based_on_template_revision": validated_data["based_on_template_revision"],
+            },
+        )
+        return obj
+
+
+def role_template_payload(role):
+    grants = template_role_grants(role)
+    return {
+        "role": role,
+        "name": Role(role).label,
+        "revision": role_template_revision(role),
+        "default_permissions": [
+            {"code": code, "scope": scope}
+            for code, scope in sorted(grants.items())
+        ],
+    }

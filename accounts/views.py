@@ -26,6 +26,8 @@ from .serializers import (
 class InvoiceViewSet(viewsets.ModelViewSet):
     serializer_class = InvoiceSerializer
     permission_classes = [AccountantPermission]
+    permission_resource = "invoice"
+    action_permissions = {"generate": "invoice:generate"}
     queryset = Invoice.objects.all()
 
     def get_queryset(self):
@@ -108,6 +110,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
 class PaymentReceiptViewSet(viewsets.ModelViewSet):
     serializer_class = PaymentReceiptSerializer
     permission_classes = [AccountantPermission]
+    permission_resource = "payment"
+    action_permissions = {"verify_bank_payment": "payment:verify"}
     queryset = PaymentReceipt.objects.all()
 
     def get_queryset(self):
@@ -193,6 +197,7 @@ class PaymentReceiptViewSet(viewsets.ModelViewSet):
 class LedgerEntryViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = LedgerEntrySerializer
     permission_classes = [AccountantPermission]
+    permission_resource = "invoice"
     queryset = LedgerEntry.objects.all()
 
     def get_queryset(self):
@@ -211,6 +216,11 @@ class LedgerEntryViewSet(viewsets.ReadOnlyModelViewSet):
 class ExpenseViewSet(viewsets.ModelViewSet):
     serializer_class = ExpenseSerializer
     permission_classes = [AccountantPermission]
+    permission_resource = "expense"
+    action_permissions = {
+        "summary": "expense:view",
+        "daily_summary": "expense:view",
+    }
     queryset = Expense.objects.all()
 
     def get_queryset(self):

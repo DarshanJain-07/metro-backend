@@ -26,7 +26,7 @@ class OfficeRegistryArchitectureTests(TestCase):
         self.state = State.objects.create(name="Maharashtra", code="MH")
         self.city = City.objects.create(name="Mumbai", state=self.state)
         self.user = User.objects.create_user(username="metro_admin", password="pw", company=self.company)
-        UserMembership.objects.create(user=self.user, company=self.company, role=Role.CLIENT_SUPER_ADMIN)
+        UserMembership.objects.create(user=self.user, company=self.company, role=Role.SUPER_ADMIN)
 
     def test_company_office_is_copy_not_live_mirror(self):
         global_office = GlobalOffice.objects.create(
@@ -98,7 +98,7 @@ class PartyMasterDataApiTests(TestCase):
         self.branch = CompanyOffice.objects.create(company=self.company, name="Andheri", city=self.city)
         self.other_branch = CompanyOffice.objects.create(company=self.company, name="Bandra", city=self.city)
         self.user = User.objects.create_user(username="party_admin", password="pw", company=self.company)
-        UserMembership.objects.create(user=self.user, company=self.company, role=Role.CLIENT_SUPER_ADMIN)
+        UserMembership.objects.create(user=self.user, company=self.company, role=Role.SUPER_ADMIN)
         self.branch_admin = User.objects.create_user(
             username="branch_party_admin",
             password="pw",

@@ -15,9 +15,9 @@ class UserPermissionsTestCase(TestCase):
         # Superuser
         self.superuser = User.objects.create_superuser(username="admin", password="password", email="admin@test.com")
         
-        # Client Super Admin
+        # Super Admin
         self.client_admin = User.objects.create_user(username="client_admin", password="password", company=self.company)
-        UserMembership.objects.create(user=self.client_admin, company=self.company, role=Role.CLIENT_SUPER_ADMIN)
+        UserMembership.objects.create(user=self.client_admin, company=self.company, role=Role.SUPER_ADMIN)
         
         # Normal User
         self.normal_user = User.objects.create_user(username="normal_user", password="password", company=self.company, office=self.office)

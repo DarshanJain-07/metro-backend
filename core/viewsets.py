@@ -42,7 +42,7 @@ class TenantOfficeScopedQuerysetMixin:
         if company and hasattr(qs.model, "company"):
             qs = qs.filter(company=company)
 
-        if company and has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN]):
+        if company and has_role(user, company=company, roles=[Role.SUPER_ADMIN]):
             return qs
 
         if self.office_scope_permission and user.has_perm(self.office_scope_permission):

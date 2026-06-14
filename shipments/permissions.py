@@ -16,6 +16,25 @@ from core.request_context import get_current_company, get_current_office
 
 
 class StrictActionPermission(permissions.BasePermission):
+    action_permissions = {
+        "list": "shipment:view",
+        "retrieve": "shipment:view",
+        "events": "shipment:view",
+        "incoming": "shipment:view",
+        "create": "shipment:create",
+        "update": "shipment:edit",
+        "partial_update": "shipment:edit",
+        "destroy": "shipment:edit",
+        "book": "shipment:create",
+        "dispatch_shipment": "shipment:dispatch",
+        "receive": "shipment:receive",
+        "assign_delivery": "shipment:receive",
+        "mark_delivered": "shipment:receive",
+        "cancel": "shipment:edit",
+        "suggested_rate": "shipment:create",
+        "preview": "shipment:create",
+    }
+
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
@@ -24,24 +43,23 @@ class StrictActionPermission(permissions.BasePermission):
         action = getattr(view, "action", None)
         company = get_current_company()
         office = get_current_office()
-        if action in ["list", "retrieve", "events"]:
-            return can(request.user, "shipment:view", company=company, office=office)
+        required = self.action_permissions.get(action)
+        if not required:
+            return False
         if action == "incoming":
             return can(
                 request.user,
                 "shipment:receive",
                 company=company,
                 office=office,
-            ) or can(request.user, "shipment:deliver", company=company, office=office)
-        if action == "create":
-            if office:
-                return can(request.user, "shipment:create", company=company, office=office)
-            return can_manage_company(request.user, company)
+            )
         if action in ["book", "dispatch_shipment", "receive", "assign_delivery", "mark_delivered", "cancel"]:
-            return True
-        if action in ["suggested_rate", "preview"]:
-            return can(request.user, "shipment:create", company=company, office=office)
-        return False
+            return can(request.user, required, company=company, office=office) or can_manage_company(request.user, company)
+        if action in ["create", "suggested_rate", "preview"]:
+            if office:
+                return can(request.user, required, company=company, office=office)
+            return can_manage_company(request.user, company)
+        return can(request.user, required, company=company, office=office)
 
     def has_object_permission(self, request, view, obj):
         if not request.user or not request.user.is_authenticated:

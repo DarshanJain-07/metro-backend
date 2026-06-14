@@ -120,7 +120,7 @@ class ShipmentWorkflowService:
     def assign_delivery(shipment, delivery_user, assigned_by):
         if not can_assign_delivery(assigned_by, shipment):
             raise ValidationError("You do not have permission to assign delivery for this shipment.")
-        if not can(delivery_user, "shipment:deliver", company=shipment.company, office=shipment.destination_office):
+        if not can(delivery_user, "shipment:receive", company=shipment.company, office=shipment.destination_office):
             raise ValidationError("Delivery user must have active delivery permission for the destination office.")
         if shipment.status != Shipment.StatusChoices.RECEIVED:
             raise ValidationError("Shipment must be received before delivery assignment.")

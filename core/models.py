@@ -41,7 +41,7 @@ class TenantManager(models.Manager):
         if company and hasattr(self.model, "company"):
             qs = qs.filter(company=company)
 
-        if company and not has_role(user, company=company, roles=[Role.CLIENT_SUPER_ADMIN]):
+        if company and not has_role(user, company=company, roles=[Role.SUPER_ADMIN]):
             office_ids = active_office_ids(user, company)
             if hasattr(self.model, "office"):
                 qs = qs.filter(models.Q(office__in=office_ids) | models.Q(office__isnull=True))
@@ -279,12 +279,84 @@ class User(AbstractUser):
 
 class Role(models.TextChoices):
     PLATFORM_ADMIN = "PLATFORM_ADMIN", _("Platform Admin")
-    CLIENT_SUPER_ADMIN = "CLIENT_SUPER_ADMIN", _("Client Super Admin")
+    SUPER_ADMIN = "SUPER_ADMIN", _("Super Admin")
     BRANCH_ADMIN = "BRANCH_ADMIN", _("Branch Admin")
     BOOKING_USER = "BOOKING_USER", _("Booking User")
     DELIVERY_USER = "DELIVERY_USER", _("Delivery User")
     ACCOUNTANT = "ACCOUNTANT", _("Accountant")
     VIEWER = "VIEWER", _("Viewer")
+
+
+class PermissionScope(models.TextChoices):
+    OWN = "own", _("Own")
+    BRANCH = "branch", _("Branch")
+    REGION = "region", _("Region")
+    COMPANY = "company", _("Company")
+    ALL = "all", _("All")
+
+
+class PermissionCatalog(models.Model):
+    code = models.CharField(max_length=100, unique=True)
+    name = models.CharField(max_length=120)
+    group = models.CharField(max_length=80)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["group", "code"]
+
+    def __str__(self):
+        return self.code
+
+
+class RoleTemplate(models.Model):
+    role = models.CharField(max_length=50, choices=Role.choices)
+    revision = models.PositiveIntegerField(default=1)
+    name = models.CharField(max_length=120)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["role", "-revision"]
+        constraints = [
+            models.UniqueConstraint(fields=["role", "revision"], name="unique_role_template_revision"),
+        ]
+
+    def __str__(self):
+        return f"{self.role} rev {self.revision}"
+
+
+class RoleTemplatePermission(models.Model):
+    template = models.ForeignKey(RoleTemplate, related_name="permission_grants", on_delete=models.CASCADE)
+    permission = models.ForeignKey(PermissionCatalog, related_name="template_grants", on_delete=models.CASCADE)
+    scope = models.CharField(max_length=20, choices=PermissionScope.choices, default=PermissionScope.BRANCH)
+
+    class Meta:
+        ordering = ["template__role", "permission__code"]
+        constraints = [
+            models.UniqueConstraint(fields=["template", "permission"], name="unique_role_template_permission"),
+        ]
+
+    def __str__(self):
+        return f"{self.template.role}: {self.permission.code}"
+
+
+class CompanyRolePermissionOverride(AuditBaseModel):
+    company = models.ForeignKey(Company, related_name="role_permission_overrides", on_delete=models.CASCADE)
+    role = models.CharField(max_length=50, choices=Role.choices)
+    permission = models.ForeignKey(PermissionCatalog, related_name="company_overrides", on_delete=models.CASCADE)
+    enabled = models.BooleanField(default=True)
+    scope = models.CharField(max_length=20, choices=PermissionScope.choices, default=PermissionScope.BRANCH)
+    based_on_template_revision = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        ordering = ["company", "role", "permission__code"]
+        constraints = [
+            models.UniqueConstraint(fields=["company", "role", "permission"], name="unique_company_role_permission_override"),
+        ]
+
+    def __str__(self):
+        state = "enabled" if self.enabled else "disabled"
+        return f"{self.company}: {self.role} {self.permission.code} {state}"
 
 
 class UserMembership(AuditBaseModel):

@@ -13,20 +13,26 @@ class UserManagementPermission(permissions.BasePermission):
         if request.user.is_superuser:
             return True
 
-        # Allow safe methods for all authenticated users (get_queryset handles scoping)
-        if request.method in permissions.SAFE_METHODS:
-            return True
-
-        # For mutations, we check if they are a Client Super Admin for their company
         from core.request_context import get_current_company, get_current_office
         company = get_current_company()
+        office = get_current_office()
+
+        if request.method in permissions.SAFE_METHODS:
+            return bool(company and can(request.user, "users:view", company=company, office=office))
+
         if not company:
             return False
 
-        office = get_current_office()
+        action = getattr(view, "action", None)
+        permission = {
+            "create": "users:create",
+            "update": "users:edit",
+            "partial_update": "users:edit",
+            "destroy": "users:delete",
+        }.get(action, "users:edit")
         if office:
-            return can(request.user, "users:manage", company=company, office=office)
-        return can(request.user, "users:manage", company=company)
+            return can(request.user, permission, company=company, office=office)
+        return can(request.user, permission, company=company)
 
     def has_object_permission(self, request, view, obj):
         if not request.user or not request.user.is_authenticated:
@@ -45,6 +51,6 @@ class UserManagementPermission(permissions.BasePermission):
             office = getattr(obj, "office", None)
             if office is None:
                 return False
-            return can(request.user, "users:manage", company=obj.company, office=office)
+            return can(request.user, "users:edit", company=obj.company, office=office)
 
         return False

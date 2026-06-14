@@ -68,7 +68,7 @@ class BillingApiPermissionTests(TestCase):
         self.accountant = User.objects.create_user(username="accountant", password="pw", company=self.company, office=self.office)
         self.admin = User.objects.create_user(username="company_admin", password="pw", company=self.company)
         UserMembership.objects.create(user=self.accountant, company=self.company, office=self.office, role=Role.ACCOUNTANT)
-        UserMembership.objects.create(user=self.admin, company=self.company, role=Role.CLIENT_SUPER_ADMIN)
+        UserMembership.objects.create(user=self.admin, company=self.company, role=Role.SUPER_ADMIN)
 
     def make_shipment(self, **kwargs):
         defaults = {

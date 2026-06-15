@@ -135,7 +135,7 @@ class UserSerializer(serializers.ModelSerializer):
             if office and office.company != company:
                 raise serializers.ValidationError({"membership_inputs": "Membership office is outside the active company."})
             if role == Role.PLATFORM_ADMIN:
-                raise serializers.ValidationError({"membership_inputs": "Client admins cannot create platform admins."})
+                raise serializers.ValidationError({"membership_inputs": "Super admins cannot create platform admins."})
         return data
 
     def create(self, validated_data):

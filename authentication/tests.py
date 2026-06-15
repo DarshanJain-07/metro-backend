@@ -16,8 +16,8 @@ class UserPermissionsTestCase(TestCase):
         self.superuser = User.objects.create_superuser(username="admin", password="password", email="admin@test.com")
         
         # Super Admin
-        self.client_admin = User.objects.create_user(username="client_admin", password="password", company=self.company)
-        UserMembership.objects.create(user=self.client_admin, company=self.company, role=Role.SUPER_ADMIN)
+        self.super_admin = User.objects.create_user(username="super_admin", password="password", company=self.company)
+        UserMembership.objects.create(user=self.super_admin, company=self.company, role=Role.SUPER_ADMIN)
         
         # Normal User
         self.normal_user = User.objects.create_user(username="normal_user", password="password", company=self.company, office=self.office)
@@ -34,8 +34,8 @@ class UserPermissionsTestCase(TestCase):
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_client_admin_can_create_user(self):
-        self.client.force_authenticate(user=self.client_admin)
+    def test_super_admin_can_create_user(self):
+        self.client.force_authenticate(user=self.super_admin)
         url = reverse('user-list')
         data = {
             "username": "new_user_by_admin",
@@ -54,17 +54,17 @@ class UserPermissionsTestCase(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         # Should only see users in their company
-        self.assertTrue(len(response.data['results']) >= 2) # client_admin and normal_user
+        self.assertTrue(len(response.data['results']) >= 2) # super_admin and normal_user
 
     def test_normal_user_cannot_update_other_user(self):
         self.client.force_authenticate(user=self.normal_user)
-        url = reverse('user-detail', kwargs={'pk': self.client_admin.pk})
+        url = reverse('user-detail', kwargs={'pk': self.super_admin.pk})
         data = {"username": "hacked_admin"}
         response = self.client.patch(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_client_admin_can_update_user_in_same_company(self):
-        self.client.force_authenticate(user=self.client_admin)
+    def test_super_admin_can_update_user_in_same_company(self):
+        self.client.force_authenticate(user=self.super_admin)
         url = reverse('user-detail', kwargs={'pk': self.normal_user.pk})
         data = {"first_name": "Updated Name"}
         response = self.client.patch(url, data, format='json')
@@ -72,11 +72,11 @@ class UserPermissionsTestCase(TestCase):
         self.normal_user.refresh_from_db()
         self.assertEqual(self.normal_user.first_name, "Updated Name")
 
-    def test_client_admin_cannot_update_user_in_other_company(self):
+    def test_super_admin_cannot_update_user_in_other_company(self):
         other_company = Company.objects.create(name="Other Company")
         other_user = User.objects.create_user(username="other_user", password="password", company=other_company)
         
-        self.client.force_authenticate(user=self.client_admin)
+        self.client.force_authenticate(user=self.super_admin)
         url = reverse('user-detail', kwargs={'pk': other_user.pk})
         data = {"first_name": "Hacked"}
         response = self.client.patch(url, data, format='json')
@@ -98,7 +98,7 @@ class UserPermissionsTestCase(TestCase):
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         
-        # Client admin can create membership
-        self.client.force_authenticate(user=self.client_admin)
+        # Super admin can create membership
+        self.client.force_authenticate(user=self.super_admin)
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)

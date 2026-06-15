@@ -61,13 +61,12 @@ class Command(BaseCommand):
             companies.append(company)
 
         def get_or_create_user(username, company, office, role, is_owner=False):
-            user, created = User.objects.get_or_create(
+            user, _ = User.objects.get_or_create(
                 username=username,
                 defaults={'email': f'{username}@example.com', 'company': company, 'office': office, 'is_owner': is_owner}
             )
-            if created:
-                user.set_password('pass123')
-                user.save()
+            user.set_password('admin123' if is_owner else 'pass123')
+            user.save()
             UserMembership.objects.get_or_create(user=user, company=company, office=office, role=role)
             return user
 

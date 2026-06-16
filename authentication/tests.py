@@ -2,7 +2,7 @@ from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
-from core.models import City, Company, CompanyOffice, Role, State, User, UserMembership
+from core.models import City, Company, CompanyOffice, GlobalOffice, Role, State, User, UserMembership
 
 class UserPermissionsTestCase(TestCase):
     def setUp(self):
@@ -50,6 +50,84 @@ class UserPermissionsTestCase(TestCase):
         }
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_super_admin_can_create_user_with_default_branch_shorthand(self):
+        self.client.force_authenticate(user=self.super_admin)
+        url = reverse('user-list')
+        data = {
+            "username": "branch_user",
+            "password": "StrongPass123!",
+            "email": "branch_user@test.com",
+            "role": Role.VIEWER,
+            "branch": self.office.id,
+        }
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        user = User.objects.get(username="branch_user")
+        self.assertEqual(user.office_id, self.office.id)
+        self.assertTrue(
+            UserMembership.objects.filter(
+                user=user,
+                company=self.company,
+                office=self.office,
+                role=Role.VIEWER,
+                is_active=True,
+            ).exists()
+        )
+
+    def test_assignable_branches_excludes_partner_discovery_offices(self):
+        partner_company = Company.objects.create(name="Partner Company")
+        partner_global = GlobalOffice.objects.create(
+            name="Partner Hub",
+            city=self.city,
+            owner_company=partner_company,
+        )
+        partner_office = CompanyOffice.objects.create(
+            company=self.company,
+            global_office=partner_global,
+            name="Partner Hub",
+            city=self.city,
+            office_type=CompanyOffice.OfficeType.PARTNER,
+        )
+
+        self.client.force_authenticate(user=self.super_admin)
+        response = self.client.get(reverse("user-assignable-branches"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        branch_ids = {item["id"] for item in response.data}
+        self.assertIn(self.office.id, branch_ids)
+        self.assertNotIn(partner_office.id, branch_ids)
+
+    def test_user_create_rejects_partner_discovery_default_branch(self):
+        partner_company = Company.objects.create(name="Partner Company")
+        partner_global = GlobalOffice.objects.create(
+            name="Partner Hub",
+            city=self.city,
+            owner_company=partner_company,
+        )
+        partner_office = CompanyOffice.objects.create(
+            company=self.company,
+            global_office=partner_global,
+            name="Partner Hub",
+            city=self.city,
+            office_type=CompanyOffice.OfficeType.PARTNER,
+        )
+
+        self.client.force_authenticate(user=self.super_admin)
+        response = self.client.post(
+            reverse("user-list"),
+            {
+                "username": "partner_branch_user",
+                "password": "StrongPass123!",
+                "email": "partner_branch_user@test.com",
+                "role": Role.VIEWER,
+                "branch": partner_office.id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("branch", response.data)
 
     def test_normal_user_can_list_users(self):
         self.client.force_authenticate(user=self.normal_user)

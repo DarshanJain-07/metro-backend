@@ -1,5 +1,6 @@
 from django.core.cache import caches
 from rest_framework import status, generics, viewsets
+from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import AnonRateThrottle
@@ -15,10 +16,12 @@ from .serializers import (
     PermissionCatalogSerializer,
     UserMembershipSerializer,
     UserSerializer,
+    assignable_user_offices,
     role_template_payload,
 )
 from .permissions import UserManagementPermission
 from core.models import CompanyRolePermissionOverride, PermissionCatalog, Role, UserMembership
+from core.serializers import CompanyOfficeSerializer
 from core.policies import can, can_manage_company, effective_role_grants, seed_role_templates
 from core.request_context import get_current_company
 
@@ -104,6 +107,14 @@ class UserViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         company = get_current_company()
         serializer.save(company=company)
+
+    @action(detail=False, methods=["get"], url_path="assignable-branches")
+    def assignable_branches(self, request):
+        company = get_current_company()
+        if not company:
+            return Response({"detail": "Active company context required."}, status=status.HTTP_400_BAD_REQUEST)
+        offices = assignable_user_offices(company).select_related("city", "city__state", "global_office")
+        return Response(CompanyOfficeSerializer(offices, many=True).data)
 
 class UserMembershipViewSet(viewsets.ModelViewSet):
     queryset = UserMembership.objects.all()

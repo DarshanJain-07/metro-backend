@@ -1,11 +1,13 @@
 from django.contrib.auth import get_user_model
 import django.contrib.auth.password_validation as validators
 from django.core.exceptions import ValidationError
+from django.db.models import Q
 from rest_framework import serializers
 
 from core.models import (
     CompanyRolePermissionOverride,
     CompanyOffice,
+    OfficeStatus,
     PermissionCatalog,
     PermissionScope,
     Role,
@@ -15,6 +17,28 @@ from core.policies import effective_membership_grants, effective_permissions_for
 from core.request_context import get_current_company
 
 User = get_user_model()
+
+
+OFFICE_ROLES = {Role.BRANCH_ADMIN, Role.BOOKING_USER, Role.DELIVERY_USER, Role.ACCOUNTANT, Role.VIEWER}
+
+
+def assignable_user_offices(company):
+    return CompanyOffice.unscoped_objects.filter(
+        company=company,
+        is_active=True,
+        status=OfficeStatus.ACTIVE,
+        office_type__in=[CompanyOffice.OfficeType.OWN, CompanyOffice.OfficeType.MANUAL],
+    ).filter(
+        Q(global_office__isnull=True)
+        | Q(global_office__owner_company__isnull=True)
+        | Q(global_office__owner_company=company)
+    ).order_by("name")
+
+
+def is_assignable_user_office(office, company):
+    if not office:
+        return True
+    return assignable_user_offices(company).filter(pk=office.pk).exists()
 
 
 def validate_and_set_password(user, password):
@@ -71,22 +95,29 @@ class UserMembershipSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"company": "Active company context required."})
         office = data.get("office", getattr(self.instance, "office", None))
         role = data.get("role", getattr(self.instance, "role", None))
-        office_roles = {Role.BRANCH_ADMIN, Role.BOOKING_USER, Role.DELIVERY_USER, Role.ACCOUNTANT, Role.VIEWER}
-        if role in office_roles and not office:
+        if role in OFFICE_ROLES and not office:
             raise serializers.ValidationError({"office": "Office is required for this role."})
         if role == Role.SUPER_ADMIN and office:
             raise serializers.ValidationError({"office": "Company-level roles must not include an office."})
-        if office and office.company != company:
-            raise serializers.ValidationError({"office": "Office does not belong to the active company."})
+        if office and not is_assignable_user_office(office, company):
+            raise serializers.ValidationError({"office": "Office cannot be assigned to users for the active company."})
         return data
 
 
 class UserSerializer(serializers.ModelSerializer):
     company_name = serializers.ReadOnlyField(source="company.name", default=None)
+    branch = serializers.PrimaryKeyRelatedField(
+        source="office",
+        queryset=CompanyOffice.unscoped_objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    branch_name = serializers.ReadOnlyField(source="office.name", default=None)
     office_name = serializers.ReadOnlyField(source="office.name", default=None)
     memberships = UserMembershipSerializer(many=True, read_only=True)
     password = serializers.CharField(write_only=True, required=False, allow_blank=False)
     membership_inputs = UserMembershipSerializer(many=True, write_only=True, required=False)
+    role = serializers.ChoiceField(choices=Role.choices, required=False, allow_blank=True)
     permissions = serializers.SerializerMethodField()
     scoped_permissions = serializers.SerializerMethodField()
 
@@ -100,7 +131,10 @@ class UserSerializer(serializers.ModelSerializer):
             "last_name",
             "password",
             "company_name",
+            "branch",
+            "branch_name",
             "office_name",
+            "role",
             "is_superuser",
             "is_owner",
             "memberships",
@@ -130,27 +164,65 @@ class UserSerializer(serializers.ModelSerializer):
             for code, scope in sorted(effective_permissions_for_user(obj).items())
         ]
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        company = get_current_company()
+        memberships = instance.memberships.all()
+        membership = next(
+            (
+                item
+                for item in memberships
+                if item.is_active and (not company or item.company_id == company.id)
+            ),
+            None,
+        )
+        data["role"] = membership.role if membership else None
+        return data
+
     def validate(self, data):
         company = get_current_company()
         if not company:
             raise serializers.ValidationError({"company": "Active company context required."})
         memberships = data.get("membership_inputs") or []
-        if not self.instance and not memberships:
+        office = data.get("office", getattr(self.instance, "office", None))
+        role = data.get("role")
+        current_membership = None
+        if not role and self.instance:
+            current_membership = self.instance.memberships.filter(company=company, is_active=True).first()
+            role = current_membership.role if current_membership else None
+            office = office or (current_membership.office if current_membership else None)
+        if not self.instance and not memberships and not role:
             raise serializers.ValidationError({"membership_inputs": "At least one membership is required."})
+        if role == "":
+            raise serializers.ValidationError({"role": "Role is required."})
+        if role in OFFICE_ROLES and not office:
+            raise serializers.ValidationError({"branch": "Default branch is required for this role."})
+        if role == Role.SUPER_ADMIN and office:
+            raise serializers.ValidationError({"branch": "Super Admin users must not have a default branch."})
+        if office and not is_assignable_user_office(office, company):
+            raise serializers.ValidationError({"branch": "This branch cannot be assigned to users for the active company."})
         for membership in memberships:
-            office = membership.get("office")
-            role = membership.get("role")
-            if office and office.company != company:
-                raise serializers.ValidationError({"membership_inputs": "Membership office is outside the active company."})
+            membership_office = membership.get("office")
+            membership_role = membership.get("role")
+            if membership_role in OFFICE_ROLES and not membership_office:
+                raise serializers.ValidationError({"membership_inputs": "Membership office is required for this role."})
+            if membership_role == Role.SUPER_ADMIN and membership_office:
+                raise serializers.ValidationError({"membership_inputs": "Company-level roles must not include an office."})
+            if membership_office and not is_assignable_user_office(membership_office, company):
+                raise serializers.ValidationError({"membership_inputs": "Membership office cannot be assigned to users."})
         return data
 
     def create(self, validated_data):
         memberships = validated_data.pop("membership_inputs", [])
         password = validated_data.pop("password", None)
+        role = validated_data.pop("role", None)
+        office = validated_data.pop("office", None)
         company = get_current_company()
+        if not memberships and role:
+            memberships = [{"office": office, "role": role}]
         user = User(**validated_data)
         user.company = company
-        user.office = next((membership.get("office") for membership in memberships if membership.get("office")), None)
+        user.office = office or next((membership.get("office") for membership in memberships if membership.get("office")), None)
         if password:
             validate_and_set_password(user, password)
         else:
@@ -166,13 +238,46 @@ class UserSerializer(serializers.ModelSerializer):
         return user
 
     def update(self, instance, validated_data):
-        validated_data.pop("membership_inputs", None)
+        memberships = validated_data.pop("membership_inputs", None)
         password = validated_data.pop("password", None)
+        role = validated_data.pop("role", None)
+        office_provided = "office" in validated_data
+        office = validated_data.pop("office", None)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
+        if office_provided:
+            instance.office = office
         if password:
             validate_and_set_password(instance, password)
         instance.save()
+        company = get_current_company()
+        if memberships is not None:
+            instance.memberships.filter(company=company).update(is_active=False)
+            for membership in memberships:
+                UserMembership.objects.update_or_create(
+                    user=instance,
+                    company=company,
+                    office=membership.get("office"),
+                    role=membership["role"],
+                    defaults={"is_active": True},
+                )
+        elif role is not None or office_provided:
+            current_membership = instance.memberships.filter(company=company, is_active=True).first()
+            next_role = role or (current_membership.role if current_membership else Role.VIEWER)
+            next_office = None if next_role == Role.SUPER_ADMIN else office
+            if next_role in OFFICE_ROLES and next_office is None and current_membership:
+                next_office = current_membership.office
+            if current_membership:
+                current_membership.role = next_role
+                current_membership.office = next_office
+                current_membership.save(update_fields=["role", "office", "updated_at"])
+            else:
+                UserMembership.objects.create(
+                    user=instance,
+                    company=company,
+                    office=next_office,
+                    role=next_role,
+                )
         return instance
 
 

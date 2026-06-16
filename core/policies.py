@@ -52,6 +52,7 @@ PERMISSION_CATALOG = {
     "users:create": ("Create Users", "Administration", "Create users and memberships."),
     "users:edit": ("Edit Users", "Administration", "Edit users and memberships."),
     "users:delete": ("Delete Users", "Administration", "Delete users and memberships."),
+    "users:reset_password": ("Reset User Passwords", "Administration", "Reset user passwords."),
     "roles:manage": ("Manage Role Permissions", "Administration", "Manage role permission overrides."),
     "reports:view": ("View Reports", "Administration", "View reports and dashboards."),
 }
@@ -83,6 +84,7 @@ ROLE_PERMISSION_GRANTS = {
         "users:create": PermissionScope.BRANCH,
         "users:edit": PermissionScope.BRANCH,
         "users:delete": PermissionScope.BRANCH,
+        "users:reset_password": PermissionScope.BRANCH,
         "roles:manage": PermissionScope.BRANCH,
         "reports:view": PermissionScope.BRANCH,
     },

@@ -17,6 +17,14 @@ from core.request_context import get_current_company
 User = get_user_model()
 
 
+def validate_and_set_password(user, password):
+    try:
+        validators.validate_password(password, user)
+    except ValidationError as exc:
+        raise serializers.ValidationError({"password": list(exc.messages)})
+    user.set_password(password)
+
+
 class UserMembershipSerializer(serializers.ModelSerializer):
     company_name = serializers.ReadOnlyField(source="company.name")
     office_name = serializers.ReadOnlyField(source="office.name", default=None)
@@ -144,11 +152,7 @@ class UserSerializer(serializers.ModelSerializer):
         user.company = company
         user.office = next((membership.get("office") for membership in memberships if membership.get("office")), None)
         if password:
-            try:
-                validators.validate_password(password, user)
-            except ValidationError as exc:
-                raise serializers.ValidationError({"password": list(exc.messages)})
-            user.set_password(password)
+            validate_and_set_password(user, password)
         else:
             user.set_unusable_password()
         user.save()
@@ -160,6 +164,16 @@ class UserSerializer(serializers.ModelSerializer):
                 role=membership["role"],
             )
         return user
+
+    def update(self, instance, validated_data):
+        validated_data.pop("membership_inputs", None)
+        password = validated_data.pop("password", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        if password:
+            validate_and_set_password(instance, password)
+        instance.save()
+        return instance
 
 
 class ChangePasswordSerializer(serializers.Serializer):

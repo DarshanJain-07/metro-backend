@@ -23,6 +23,9 @@ class UserPermissionsTestCase(TestCase):
         self.normal_user = User.objects.create_user(username="normal_user", password="password", company=self.company, office=self.office)
         UserMembership.objects.create(user=self.normal_user, company=self.company, office=self.office, role=Role.VIEWER)
 
+        self.branch_admin = User.objects.create_user(username="branch_admin", password="password", company=self.company, office=self.office)
+        UserMembership.objects.create(user=self.branch_admin, company=self.company, office=self.office, role=Role.BRANCH_ADMIN)
+
     def test_normal_user_cannot_create_user(self):
         self.client.force_authenticate(user=self.normal_user)
         url = reverse('user-list')
@@ -83,6 +86,65 @@ class UserPermissionsTestCase(TestCase):
         # Depending on how get_queryset and permissions interact, this might be 404 or 403.
         # get_queryset filters by current company, so it should be 404.
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_branch_admin_can_reset_same_branch_member_password(self):
+        self.client.force_authenticate(user=self.branch_admin)
+        url = reverse('user-detail', kwargs={'pk': self.normal_user.pk})
+        response = self.client.patch(url, {"password": "NewStrongPass123!"}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.normal_user.refresh_from_db()
+        self.assertTrue(self.normal_user.check_password("NewStrongPass123!"))
+
+    def test_branch_admin_cannot_reset_branch_admin_password(self):
+        other_branch_admin = User.objects.create_user(
+            username="other_branch_admin",
+            password="password",
+            company=self.company,
+            office=self.office,
+        )
+        UserMembership.objects.create(
+            user=other_branch_admin,
+            company=self.company,
+            office=self.office,
+            role=Role.BRANCH_ADMIN,
+        )
+
+        self.client.force_authenticate(user=self.branch_admin)
+        url = reverse('user-detail', kwargs={'pk': other_branch_admin.pk})
+        response = self.client.patch(url, {"password": "NewStrongPass123!"}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        other_branch_admin.refresh_from_db()
+        self.assertTrue(other_branch_admin.check_password("password"))
+
+    def test_branch_admin_cannot_reset_other_branch_member_password(self):
+        other_office = CompanyOffice.objects.create(company=self.company, name="Other Office", city=self.city)
+        other_user = User.objects.create_user(
+            username="other_branch_user",
+            password="password",
+            company=self.company,
+            office=other_office,
+        )
+        UserMembership.objects.create(
+            user=other_user,
+            company=self.company,
+            office=other_office,
+            role=Role.VIEWER,
+        )
+
+        self.client.force_authenticate(user=self.branch_admin)
+        url = reverse('user-detail', kwargs={'pk': other_user.pk})
+        response = self.client.patch(url, {"password": "NewStrongPass123!"}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        other_user.refresh_from_db()
+        self.assertTrue(other_user.check_password("password"))
+
+    def test_super_admin_can_reset_branch_admin_password(self):
+        self.client.force_authenticate(user=self.super_admin)
+        url = reverse('user-detail', kwargs={'pk': self.branch_admin.pk})
+        response = self.client.patch(url, {"password": "NewStrongPass123!"}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.branch_admin.refresh_from_db()
+        self.assertTrue(self.branch_admin.check_password("NewStrongPass123!"))
 
     def test_membership_permissions(self):
         url = reverse('membership-list')

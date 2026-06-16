@@ -1,5 +1,52 @@
 from rest_framework import permissions
+from core.models import Role
 from core.policies import can, can_manage_company
+
+OFFICE_MEMBER_ROLES = {
+    Role.BOOKING_USER,
+    Role.DELIVERY_USER,
+    Role.ACCOUNTANT,
+    Role.VIEWER,
+}
+
+
+def _request_resets_password(request):
+    password = request.data.get("password") if hasattr(request, "data") else None
+    return password not in (None, "")
+
+
+def _action_resets_password(request, view):
+    return getattr(view, "action", None) in {"update", "partial_update"} and _request_resets_password(request)
+
+
+def _target_memberships(user, company):
+    return list(
+        user.memberships.filter(company=company, is_active=True).select_related("office")
+    )
+
+
+def can_reset_target_password(actor, target, company, office=None):
+    if not company:
+        return False
+
+    if actor.is_superuser or can_manage_company(actor, company):
+        return True
+
+    if not office or actor == target:
+        return False
+
+    memberships = _target_memberships(target, company)
+    if not memberships:
+        return False
+
+    for membership in memberships:
+        if membership.role not in OFFICE_MEMBER_ROLES:
+            return False
+        if membership.office_id != office.id:
+            return False
+
+    return can(actor, "users:reset_password", company=company, office=office)
+
 
 class UserManagementPermission(permissions.BasePermission):
     """
@@ -24,12 +71,15 @@ class UserManagementPermission(permissions.BasePermission):
             return False
 
         action = getattr(view, "action", None)
-        permission = {
-            "create": "users:create",
-            "update": "users:edit",
-            "partial_update": "users:edit",
-            "destroy": "users:delete",
-        }.get(action, "users:edit")
+        if _action_resets_password(request, view):
+            permission = "users:reset_password"
+        else:
+            permission = {
+                "create": "users:create",
+                "update": "users:edit",
+                "partial_update": "users:edit",
+                "destroy": "users:delete",
+            }.get(action, "users:edit")
         if office:
             return can(request.user, permission, company=company, office=office)
         return can(request.user, permission, company=company)
@@ -45,7 +95,13 @@ class UserManagementPermission(permissions.BasePermission):
         if request.method in permissions.SAFE_METHODS:
             return True
 
+        from core.request_context import get_current_company, get_current_office
+
         if hasattr(obj, 'company'):
+            company = get_current_company() or obj.company
+            if _action_resets_password(request, view):
+                return can_reset_target_password(request.user, obj, company, get_current_office())
+
             if can_manage_company(request.user, obj.company):
                 return True
             office = getattr(obj, "office", None)

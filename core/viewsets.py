@@ -31,8 +31,7 @@ class TenantOfficeScopedQuerysetMixin:
         if not user or not user.is_authenticated:
             return qs.none()
 
-        from core.models import Role
-        from core.policies import active_office_ids, has_role
+        from core.policies import active_office_ids, can_manage_company
         from core.request_context import get_current_company
 
         if user.is_superuser:
@@ -42,7 +41,7 @@ class TenantOfficeScopedQuerysetMixin:
         if company and hasattr(qs.model, "company"):
             qs = qs.filter(company=company)
 
-        if company and has_role(user, company=company, roles=[Role.SUPER_ADMIN]):
+        if company and can_manage_company(user, company):
             return qs
 
         if self.office_scope_permission and user.has_perm(self.office_scope_permission):

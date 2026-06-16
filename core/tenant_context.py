@@ -2,16 +2,8 @@ from dataclasses import dataclass
 
 from django.core.exceptions import ValidationError
 
-from core.models import Role, UserMembership
-
-
-OFFICE_SCOPED_ROLES = {
-    Role.BRANCH_ADMIN,
-    Role.BOOKING_USER,
-    Role.DELIVERY_USER,
-    Role.ACCOUNTANT,
-    Role.VIEWER,
-}
+from core.models import UserMembership
+from core.policies import role_requires_office
 
 
 @dataclass
@@ -58,7 +50,7 @@ def resolve_active_tenant_context(user, company_id=None, office_id=None):
             raise ValidationError("Active company/office context required.")
 
     active_membership = candidates[0]
-    if active_membership.role in OFFICE_SCOPED_ROLES and active_membership.office_id is None:
+    if role_requires_office(active_membership.role) and active_membership.office_id is None:
         raise ValidationError("Active office context required for this role.")
 
     return ActiveTenantContext(

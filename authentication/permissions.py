@@ -1,13 +1,5 @@
 from rest_framework import permissions
-from core.models import Role
-from core.policies import can, can_manage_company
-
-OFFICE_MEMBER_ROLES = {
-    Role.BOOKING_USER,
-    Role.DELIVERY_USER,
-    Role.ACCOUNTANT,
-    Role.VIEWER,
-}
+from core.policies import can, can_manage_company, effective_membership_grants, role_requires_office
 
 
 def _request_resets_password(request):
@@ -40,7 +32,9 @@ def can_reset_target_password(actor, target, company, office=None):
         return False
 
     for membership in memberships:
-        if membership.role not in OFFICE_MEMBER_ROLES:
+        if not role_requires_office(membership.role):
+            return False
+        if "users:reset_password" in effective_membership_grants(membership):
             return False
         if membership.office_id != office.id:
             return False

@@ -1,6 +1,6 @@
 from django.core.exceptions import ValidationError
-
 from django.db import models
+from django.db.utils import DatabaseError, ProgrammingError
 
 from core.models import (
     CompanyRolePermissionOverride,
@@ -8,19 +8,20 @@ from core.models import (
     PermissionCatalog,
     PermissionScope,
     Role,
+    RoleDefinition,
     RoleTemplate,
     RoleTemplatePermission,
     UserMembership,
 )
 
 
-COMPANY_ROLES = (Role.SUPER_ADMIN,)
-OFFICE_ROLES = (
-    Role.BRANCH_ADMIN,
-    Role.BOOKING_USER,
-    Role.DELIVERY_USER,
-    Role.ACCOUNTANT,
-    Role.VIEWER,
+DEFAULT_ROLE_DEFINITIONS = (
+    {"code": Role.SUPER_ADMIN, "name": "Super Admin", "requires_office": False, "sort_order": 10},
+    {"code": Role.BRANCH_ADMIN, "name": "Branch Admin", "requires_office": True, "sort_order": 20},
+    {"code": Role.BOOKING_USER, "name": "Booking User", "requires_office": True, "sort_order": 30},
+    {"code": Role.DELIVERY_USER, "name": "Delivery User", "requires_office": True, "sort_order": 40},
+    {"code": Role.ACCOUNTANT, "name": "Accountant", "requires_office": True, "sort_order": 50},
+    {"code": Role.VIEWER, "name": "Viewer", "requires_office": True, "sort_order": 60},
 )
 
 PERMISSION_CATALOG = {
@@ -242,7 +243,7 @@ def template_role_grants(role):
 def effective_role_grants(company, role):
     grants = template_role_grants(role)
     if company:
-        overrides = CompanyRolePermissionOverride.objects.filter(
+        overrides = CompanyRolePermissionOverride.unscoped_objects.filter(
             company=company,
             role=role,
             permission__is_active=True,
@@ -312,7 +313,66 @@ def seed_permission_catalog():
         )
 
 
+def seed_role_definitions():
+    for definition in DEFAULT_ROLE_DEFINITIONS:
+        try:
+            RoleDefinition.objects.get_or_create(
+                code=definition["code"],
+                defaults={
+                    "name": definition["name"],
+                    "requires_office": definition["requires_office"],
+                    "sort_order": definition["sort_order"],
+                    "is_active": True,
+                },
+            )
+        except (DatabaseError, ProgrammingError):
+            return
+
+
+def active_role_definitions():
+    seed_role_definitions()
+    try:
+        return RoleDefinition.objects.filter(is_active=True).order_by("sort_order", "name")
+    except (DatabaseError, ProgrammingError):
+        return []
+
+
+def default_role_definition_payloads():
+    return [
+        {
+            "id": None,
+            "code": definition["code"],
+            "name": definition["name"],
+            "description": "",
+            "requires_office": definition["requires_office"],
+            "is_active": True,
+            "sort_order": definition["sort_order"],
+        }
+        for definition in DEFAULT_ROLE_DEFINITIONS
+    ]
+
+
+def role_definition(role):
+    seed_role_definitions()
+    try:
+        return RoleDefinition.objects.filter(code=role, is_active=True).first()
+    except (DatabaseError, ProgrammingError):
+        return None
+
+
+def role_requires_office(role):
+    definition = role_definition(role)
+    if definition is not None:
+        return definition.requires_office
+    default_definition = next(
+        (item for item in DEFAULT_ROLE_DEFINITIONS if item["code"] == role),
+        None,
+    )
+    return True if default_definition is None else default_definition["requires_office"]
+
+
 def seed_role_templates(revision=1):
+    seed_role_definitions()
     seed_permission_catalog()
     for role, grants in ROLE_PERMISSION_GRANTS.items():
         if "*" in grants:
@@ -320,7 +380,7 @@ def seed_role_templates(revision=1):
         template, _ = RoleTemplate.objects.update_or_create(
             role=role,
             revision=revision,
-            defaults={"name": Role(role).label, "is_active": True},
+            defaults={"name": role_definition(role).name if role_definition(role) else role, "is_active": True},
         )
         for code, scope in grants.items():
             permission = PermissionCatalog.objects.filter(code=code).first()
@@ -389,7 +449,7 @@ def can_manage_master_data(user, company):
 
 
 def active_master_scope(role=None, office=None):
-    if office and role in OFFICE_ROLES:
+    if office and role_requires_office(role):
         return MasterScope.BRANCH, str(office.id)
     return MasterScope.COMPANY, None
 
@@ -408,7 +468,7 @@ def visible_master_scope_filter(user, company):
         return models.Q(pk__in=[])
     if user and user.is_superuser:
         return models.Q()
-    if has_role(user, company=company, roles=[Role.SUPER_ADMIN]):
+    if can_manage_company(user, company):
         return models.Q(scope_type=MasterScope.COMPANY)
 
     branch_scope_ids = [str(office_id) for office_id in active_office_ids(user, company)]
@@ -427,7 +487,7 @@ def can_manage_company(user, company):
         return True
     if not company:
         return False
-    return has_role(user, company=company, roles=[Role.SUPER_ADMIN])
+    return can(user, "*", company=company)
 
 
 def can_manage_office(user, office):

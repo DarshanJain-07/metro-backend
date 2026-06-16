@@ -14,15 +14,23 @@ from .serializers import (
     ChangePasswordSerializer,
     CompanyRolePermissionOverrideSerializer,
     PermissionCatalogSerializer,
+    RoleDefinitionSerializer,
     UserMembershipSerializer,
     UserSerializer,
     assignable_user_offices,
     role_template_payload,
 )
 from .permissions import UserManagementPermission
-from core.models import CompanyRolePermissionOverride, PermissionCatalog, Role, UserMembership
+from core.models import CompanyRolePermissionOverride, PermissionCatalog, RoleDefinition, UserMembership
 from core.serializers import CompanyOfficeSerializer
-from core.policies import can, can_manage_company, effective_role_grants, seed_role_templates
+from core.policies import (
+    active_role_definitions,
+    can,
+    can_manage_company,
+    default_role_definition_payloads,
+    effective_role_grants,
+    seed_role_templates,
+)
 from core.request_context import get_current_company
 
 User = get_user_model()
@@ -159,12 +167,27 @@ class PermissionCatalogViewSet(viewsets.ReadOnlyModelViewSet):
         return super().get_queryset()
 
 
+class RoleDefinitionViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = RoleDefinitionSerializer
+    permission_classes = [RolePermissionAdminPermission]
+
+    def get_queryset(self):
+        return active_role_definitions()
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        if isinstance(queryset, list):
+            return Response(default_role_definition_payloads())
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+
 class RoleTemplateViewSet(viewsets.ViewSet):
     permission_classes = [RolePermissionAdminPermission]
 
     def list(self, request):
         seed_role_templates()
-        return Response([role_template_payload(role) for role, _label in Role.choices])
+        return Response([role_template_payload(role.code) for role in active_role_definitions()])
 
 
 class CompanyRolePermissionViewSet(viewsets.ViewSet):
@@ -174,7 +197,7 @@ class CompanyRolePermissionViewSet(viewsets.ViewSet):
         seed_role_templates()
         company = get_current_company()
         role = request.query_params.get("role")
-        roles = [role] if role else [item for item, _label in Role.choices]
+        roles = [role] if role else [item.code for item in active_role_definitions()]
         payload = []
         for role_name in roles:
             grants = effective_role_grants(company, role_name)

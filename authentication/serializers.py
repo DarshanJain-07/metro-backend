@@ -11,15 +11,21 @@ from core.models import (
     PermissionCatalog,
     PermissionScope,
     Role,
+    RoleDefinition,
     UserMembership,
 )
-from core.policies import effective_membership_grants, effective_permissions_for_user, role_template_revision, template_role_grants
+from core.policies import (
+    active_role_definitions,
+    effective_membership_grants,
+    effective_permissions_for_user,
+    role_definition,
+    role_requires_office,
+    role_template_revision,
+    template_role_grants,
+)
 from core.request_context import get_current_company
 
 User = get_user_model()
-
-
-OFFICE_ROLES = {Role.BRANCH_ADMIN, Role.BOOKING_USER, Role.DELIVERY_USER, Role.ACCOUNTANT, Role.VIEWER}
 
 
 def assignable_user_offices(company):
@@ -95,9 +101,11 @@ class UserMembershipSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"company": "Active company context required."})
         office = data.get("office", getattr(self.instance, "office", None))
         role = data.get("role", getattr(self.instance, "role", None))
-        if role in OFFICE_ROLES and not office:
+        if role and not role_definition(role):
+            raise serializers.ValidationError({"role": "Invalid role."})
+        if role and role_requires_office(role) and not office:
             raise serializers.ValidationError({"office": "Office is required for this role."})
-        if role == Role.SUPER_ADMIN and office:
+        if role and not role_requires_office(role) and office:
             raise serializers.ValidationError({"office": "Company-level roles must not include an office."})
         if office and not is_assignable_user_office(office, company):
             raise serializers.ValidationError({"office": "Office cannot be assigned to users for the active company."})
@@ -117,7 +125,7 @@ class UserSerializer(serializers.ModelSerializer):
     memberships = UserMembershipSerializer(many=True, read_only=True)
     password = serializers.CharField(write_only=True, required=False, allow_blank=False)
     membership_inputs = UserMembershipSerializer(many=True, write_only=True, required=False)
-    role = serializers.ChoiceField(choices=Role.choices, required=False, allow_blank=True)
+    role = serializers.CharField(required=False, allow_blank=True)
     permissions = serializers.SerializerMethodField()
     scoped_permissions = serializers.SerializerMethodField()
 
@@ -195,18 +203,22 @@ class UserSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"membership_inputs": "At least one membership is required."})
         if role == "":
             raise serializers.ValidationError({"role": "Role is required."})
-        if role in OFFICE_ROLES and not office:
+        if role and not role_definition(role):
+            raise serializers.ValidationError({"role": "Invalid role."})
+        if role and role_requires_office(role) and not office:
             raise serializers.ValidationError({"branch": "Default branch is required for this role."})
-        if role == Role.SUPER_ADMIN and office:
-            raise serializers.ValidationError({"branch": "Super Admin users must not have a default branch."})
+        if role and not role_requires_office(role) and office:
+            raise serializers.ValidationError({"branch": "Company-level roles must not have a default branch."})
         if office and not is_assignable_user_office(office, company):
             raise serializers.ValidationError({"branch": "This branch cannot be assigned to users for the active company."})
         for membership in memberships:
             membership_office = membership.get("office")
             membership_role = membership.get("role")
-            if membership_role in OFFICE_ROLES and not membership_office:
+            if membership_role and not role_definition(membership_role):
+                raise serializers.ValidationError({"membership_inputs": "Invalid membership role."})
+            if membership_role and role_requires_office(membership_role) and not membership_office:
                 raise serializers.ValidationError({"membership_inputs": "Membership office is required for this role."})
-            if membership_role == Role.SUPER_ADMIN and membership_office:
+            if membership_role and not role_requires_office(membership_role) and membership_office:
                 raise serializers.ValidationError({"membership_inputs": "Company-level roles must not include an office."})
             if membership_office and not is_assignable_user_office(membership_office, company):
                 raise serializers.ValidationError({"membership_inputs": "Membership office cannot be assigned to users."})
@@ -264,8 +276,8 @@ class UserSerializer(serializers.ModelSerializer):
         elif role is not None or office_provided:
             current_membership = instance.memberships.filter(company=company, is_active=True).first()
             next_role = role or (current_membership.role if current_membership else Role.VIEWER)
-            next_office = None if next_role == Role.SUPER_ADMIN else office
-            if next_role in OFFICE_ROLES and next_office is None and current_membership:
+            next_office = office if role_requires_office(next_role) else None
+            if role_requires_office(next_role) and next_office is None and current_membership:
                 next_office = current_membership.office
             if current_membership:
                 current_membership.role = next_role
@@ -305,10 +317,16 @@ class PermissionCatalogSerializer(serializers.ModelSerializer):
 
 
 class RoleTemplateSummarySerializer(serializers.Serializer):
-    role = serializers.ChoiceField(choices=Role.choices)
+    role = serializers.CharField()
     name = serializers.CharField()
     revision = serializers.IntegerField()
     default_permissions = serializers.ListField()
+
+
+class RoleDefinitionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RoleDefinition
+        fields = ("id", "code", "name", "description", "requires_office", "is_active", "sort_order")
 
 
 class CompanyRolePermissionOverrideSerializer(serializers.ModelSerializer):
@@ -342,6 +360,11 @@ class CompanyRolePermissionOverrideSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Invalid scope.")
         return value
 
+    def validate_role(self, value):
+        if not role_definition(value):
+            raise serializers.ValidationError("Invalid role.")
+        return value
+
     def create(self, validated_data):
         company = get_current_company()
         if not company:
@@ -363,9 +386,11 @@ class CompanyRolePermissionOverrideSerializer(serializers.ModelSerializer):
 
 def role_template_payload(role):
     grants = template_role_grants(role)
+    definition = role_definition(role)
     return {
         "role": role,
-        "name": Role(role).label,
+        "name": definition.name if definition else role,
+        "requires_office": definition.requires_office if definition else True,
         "revision": role_template_revision(role),
         "default_permissions": [
             {"code": code, "scope": scope}

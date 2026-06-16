@@ -8,13 +8,13 @@ from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.models import City, CompanyOffice, GlobalOffice, MasterScope, OfficeStatus, Party, Role, State
+from core.models import City, CompanyOffice, GlobalOffice, MasterScope, OfficeStatus, Party, State
 from core.policies import (
     active_office_ids,
     assign_master_scope,
     active_master_scope,
     can,
-    has_role,
+    can_manage_company,
     visible_master_scope_filter,
 )
 from core.request_context import get_current_company, get_current_office, get_current_role
@@ -87,7 +87,7 @@ def company_scoped_queryset(queryset, user):
     qs = queryset.filter(company=company)
     if hasattr(queryset.model, "scope_type"):
         qs = qs.filter(visible_master_scope_filter(user, company))
-    elif not has_role(user, company=company, roles=[Role.SUPER_ADMIN]):
+    elif not can_manage_company(user, company):
         office_ids = active_office_ids(user, company)
         if hasattr(queryset.model, "office"):
             qs = qs.filter(models.Q(office__in=office_ids) | models.Q(office__isnull=True))
@@ -154,7 +154,7 @@ class DashboardStatsView(APIView):
             ).distinct()
             invoices = invoices.filter(office_id=office_id)
             payments = payments.filter(office_id=office_id)
-        elif not has_role(user, company=company, roles=[Role.SUPER_ADMIN]):
+        elif not can_manage_company(user, company):
             office_ids = active_office_ids(user, company)
             shipments = shipments.filter(
                 models.Q(origin_office_id__in=office_ids)

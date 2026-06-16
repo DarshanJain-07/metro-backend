@@ -32,7 +32,7 @@ class TenantManager(models.Manager):
         if not user or not user.is_authenticated:
             return qs
 
-        from core.policies import active_office_ids, has_role
+        from core.policies import active_office_ids, can_manage_company
 
         if user.is_superuser:
             return qs
@@ -41,7 +41,7 @@ class TenantManager(models.Manager):
         if company and hasattr(self.model, "company"):
             qs = qs.filter(company=company)
 
-        if company and not has_role(user, company=company, roles=[Role.SUPER_ADMIN]):
+        if company and not can_manage_company(user, company):
             office_ids = active_office_ids(user, company)
             if hasattr(self.model, "office"):
                 qs = qs.filter(models.Q(office__in=office_ids) | models.Q(office__isnull=True))
@@ -286,6 +286,21 @@ class Role(models.TextChoices):
     VIEWER = "VIEWER", _("Viewer")
 
 
+class RoleDefinition(models.Model):
+    code = models.CharField(max_length=50, unique=True)
+    name = models.CharField(max_length=120)
+    description = models.TextField(blank=True)
+    requires_office = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=100)
+
+    class Meta:
+        ordering = ["sort_order", "name"]
+
+    def __str__(self):
+        return self.name
+
+
 class PermissionScope(models.TextChoices):
     OWN = "own", _("Own")
     BRANCH = "branch", _("Branch")
@@ -309,7 +324,7 @@ class PermissionCatalog(models.Model):
 
 
 class RoleTemplate(models.Model):
-    role = models.CharField(max_length=50, choices=Role.choices)
+    role = models.CharField(max_length=50)
     revision = models.PositiveIntegerField(default=1)
     name = models.CharField(max_length=120)
     is_active = models.BooleanField(default=True)
@@ -341,7 +356,7 @@ class RoleTemplatePermission(models.Model):
 
 class CompanyRolePermissionOverride(AuditBaseModel):
     company = models.ForeignKey(Company, related_name="role_permission_overrides", on_delete=models.CASCADE)
-    role = models.CharField(max_length=50, choices=Role.choices)
+    role = models.CharField(max_length=50)
     permission = models.ForeignKey(PermissionCatalog, related_name="company_overrides", on_delete=models.CASCADE)
     enabled = models.BooleanField(default=True)
     scope = models.CharField(max_length=20, choices=PermissionScope.choices, default=PermissionScope.BRANCH)
@@ -362,18 +377,11 @@ class UserMembership(AuditBaseModel):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="memberships", on_delete=models.CASCADE)
     company = models.ForeignKey(Company, related_name="memberships", on_delete=models.CASCADE)
     office = models.ForeignKey(CompanyOffice, related_name="memberships", on_delete=models.CASCADE, null=True, blank=True)
-    role = models.CharField(max_length=50, choices=Role.choices)
+    role = models.CharField(max_length=50)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=["user", "company", "office", "role"], name="unique_user_membership"),
-            models.CheckConstraint(
-                condition=~models.Q(
-                    role__in=[Role.BRANCH_ADMIN, Role.BOOKING_USER, Role.DELIVERY_USER, Role.ACCOUNTANT, Role.VIEWER]
-                )
-                | models.Q(office__isnull=False),
-                name="office_required_for_operational_roles",
-            ),
         ]
 
     def __str__(self):

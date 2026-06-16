@@ -105,8 +105,8 @@ class TenantMiddleware:
         company_id = request.headers.get("X-Company-ID")
         office_id = request.headers.get("X-Office-ID")
 
-        from core.tenant_context import OFFICE_SCOPED_ROLES
         from core.models import UserMembership
+        from core.policies import role_requires_office
 
         memberships = list(
             UserMembership.unscoped_objects.filter(user=user, is_active=True).select_related("company", "office")
@@ -143,7 +143,7 @@ class TenantMiddleware:
                 return JsonResponse({"detail": "Active company/office context required."}, status=400)
 
         active_membership = candidates[0]
-        if active_membership.role in OFFICE_SCOPED_ROLES and active_membership.office_id is None:
+        if role_requires_office(active_membership.role) and active_membership.office_id is None:
             return JsonResponse({"detail": "Active office context required for this role."}, status=400)
 
         return self._with_context(request, active_membership.company, active_membership.office, active_membership.role)

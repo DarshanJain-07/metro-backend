@@ -10,7 +10,7 @@ from rest_framework.test import APIClient
 from accounts.models import Invoice, InvoiceLine
 from core.models import City, Company, CompanyOffice, Party, Role, State, UserMembership
 from core.policies import can_view_shipment
-from shipments.models import RateCard, RateRule, Shipment, ShipmentEvent, ShipmentLineItem
+from shipments.models import DeliveryAssignment, ProofOfDelivery, RateCard, RateRule, Shipment, ShipmentEvent, ShipmentLineItem
 from shipments.services import ShipmentWorkflowService
 
 User = get_user_model()
@@ -71,6 +71,31 @@ class ShipmentArchitectureTests(TestCase):
         self.assertEqual(self.shipment.origin_office, self.origin)
         self.assertEqual(self.shipment.destination_office, self.destination)
         self.assertFalse(hasattr(self.shipment, "global_office_id"))
+
+    def test_child_rows_copy_company_from_parent(self):
+        line_item = self.shipment.line_items.get()
+        event = ShipmentWorkflowService.record_event(
+            self.shipment,
+            ShipmentEvent.EventType.RECEIVED,
+            self.origin_user,
+            office=self.transit,
+        )
+        assignment = DeliveryAssignment.objects.create(
+            shipment=self.shipment,
+            delivery_user=self.transit_user,
+            assigned_by=self.origin_user,
+        )
+        pod = ProofOfDelivery.objects.create(
+            shipment=self.shipment,
+            received_by_name="Receiver",
+            received_by_phone="1234567890",
+            delivered_at=timezone.now(),
+        )
+
+        self.assertEqual(line_item.company_id, self.company.id)
+        self.assertEqual(event.company_id, self.company.id)
+        self.assertEqual(assignment.company_id, self.company.id)
+        self.assertEqual(pod.company_id, self.company.id)
 
 
 class ShipmentLifecycleApiTests(TestCase):

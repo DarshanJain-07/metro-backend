@@ -77,7 +77,7 @@ def materialize_global_offices_from_company_offices():
 def company_scoped_queryset(queryset, user):
     if not user.is_authenticated:
         return queryset.none()
-    if user.is_superuser or has_role(user, roles=[Role.PLATFORM_ADMIN]):
+    if user.is_superuser:
         return queryset
 
     company = get_current_company()
@@ -111,7 +111,7 @@ class ActionModelPermission(BasePermission):
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
-        if request.user.is_superuser or has_role(request.user, roles=[Role.PLATFORM_ADMIN]):
+        if request.user.is_superuser:
             return True
 
         action_name = getattr(view, "action", None)
@@ -154,7 +154,7 @@ class DashboardStatsView(APIView):
             ).distinct()
             invoices = invoices.filter(office_id=office_id)
             payments = payments.filter(office_id=office_id)
-        elif not has_role(user, company=company, roles=[Role.SUPER_ADMIN, Role.PLATFORM_ADMIN]):
+        elif not has_role(user, company=company, roles=[Role.SUPER_ADMIN]):
             office_ids = active_office_ids(user, company)
             shipments = shipments.filter(
                 models.Q(origin_office_id__in=office_ids)

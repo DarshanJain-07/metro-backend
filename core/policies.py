@@ -14,7 +14,7 @@ from core.models import (
 )
 
 
-COMPANY_ROLES = (Role.PLATFORM_ADMIN, Role.SUPER_ADMIN)
+COMPANY_ROLES = (Role.SUPER_ADMIN,)
 OFFICE_ROLES = (
     Role.BRANCH_ADMIN,
     Role.BOOKING_USER,
@@ -57,7 +57,6 @@ PERMISSION_CATALOG = {
 }
 
 ROLE_PERMISSION_GRANTS = {
-    Role.PLATFORM_ADMIN: {"*": PermissionScope.ALL},
     Role.SUPER_ADMIN: {"*": PermissionScope.COMPANY},
     Role.BRANCH_ADMIN: {
         "shipment:view": PermissionScope.BRANCH,
@@ -405,7 +404,7 @@ def assign_master_scope(instance, role=None, office=None):
 def visible_master_scope_filter(user, company):
     if not company:
         return models.Q(pk__in=[])
-    if user and (user.is_superuser or has_role(user, roles=[Role.PLATFORM_ADMIN])):
+    if user and user.is_superuser:
         return models.Q()
     if has_role(user, company=company, roles=[Role.SUPER_ADMIN]):
         return models.Q(scope_type=MasterScope.COMPANY)
@@ -422,7 +421,7 @@ def can_manage_office_master_data(user, office):
 
 
 def can_manage_company(user, company):
-    if user and (user.is_superuser or has_role(user, roles=[Role.PLATFORM_ADMIN])):
+    if user and user.is_superuser:
         return True
     if not company:
         return False

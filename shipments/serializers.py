@@ -372,7 +372,7 @@ class ShipmentSerializer(serializers.ModelSerializer):
             rate_rule_id = item_data.pop("_rate_rule_id", None)
             if rate_rule_id:
                 item_data["rate_rule_id"] = rate_rule_id
-            ShipmentLineItem.objects.create(shipment=shipment, **item_data)
+            ShipmentLineItem.objects.create(company=shipment.company, shipment=shipment, **item_data)
 
     def _update_totals(self, shipment):
         items = list(shipment.line_items.all())

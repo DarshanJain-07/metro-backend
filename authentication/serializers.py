@@ -66,7 +66,7 @@ class UserMembershipSerializer(serializers.ModelSerializer):
         office_roles = {Role.BRANCH_ADMIN, Role.BOOKING_USER, Role.DELIVERY_USER, Role.ACCOUNTANT, Role.VIEWER}
         if role in office_roles and not office:
             raise serializers.ValidationError({"office": "Office is required for this role."})
-        if role in (Role.PLATFORM_ADMIN, Role.SUPER_ADMIN) and office:
+        if role == Role.SUPER_ADMIN and office:
             raise serializers.ValidationError({"office": "Company-level roles must not include an office."})
         if office and office.company != company:
             raise serializers.ValidationError({"office": "Office does not belong to the active company."})
@@ -134,8 +134,6 @@ class UserSerializer(serializers.ModelSerializer):
             role = membership.get("role")
             if office and office.company != company:
                 raise serializers.ValidationError({"membership_inputs": "Membership office is outside the active company."})
-            if role == Role.PLATFORM_ADMIN:
-                raise serializers.ValidationError({"membership_inputs": "Super admins cannot create platform admins."})
         return data
 
     def create(self, validated_data):
@@ -219,11 +217,6 @@ class CompanyRolePermissionOverrideSerializer(serializers.ModelSerializer):
             "based_on_template_revision",
         )
         read_only_fields = ("id", "code", "name", "group")
-
-    def validate_role(self, value):
-        if value == Role.PLATFORM_ADMIN:
-            raise serializers.ValidationError("Platform admin permissions are managed globally.")
-        return value
 
     def validate_scope(self, value):
         if value not in PermissionScope.values:

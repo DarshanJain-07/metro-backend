@@ -1,4 +1,5 @@
 from django.test import TestCase
+from django.db import connection
 from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -7,6 +8,7 @@ from core.models import (
     City,
     Company,
     CompanyOffice,
+    CompanyRolePermissionOverride,
     GlobalOffice,
     MasterScope,
     OfficeStatus,
@@ -16,6 +18,100 @@ from core.models import (
     User,
     UserMembership,
 )
+from accounts.models import BankPaymentVerification, Expense, Invoice, InvoiceLine, LedgerEntry, PaymentReceipt
+from shipments.models import (
+    DeliveryAssignment,
+    OfficeRatePolicy,
+    ProofOfDelivery,
+    RateCard,
+    RateRule,
+    Shipment,
+    ShipmentEvent,
+    ShipmentLineItem,
+    ShipmentSequence,
+)
+
+
+TENANT_OWNED_MODELS = [
+    CompanyOffice,
+    CompanyRolePermissionOverride,
+    Party,
+    UserMembership,
+    Shipment,
+    ShipmentLineItem,
+    ShipmentEvent,
+    DeliveryAssignment,
+    ProofOfDelivery,
+    RateCard,
+    RateRule,
+    OfficeRatePolicy,
+    ShipmentSequence,
+    Invoice,
+    InvoiceLine,
+    PaymentReceipt,
+    BankPaymentVerification,
+    LedgerEntry,
+    Expense,
+]
+
+
+TENANT_OWNED_TABLES = [
+    "core_companyoffice",
+    "core_companyrolepermissionoverride",
+    "core_party",
+    "core_usermembership",
+    "shipments_deliveryassignment",
+    "shipments_officeratepolicy",
+    "shipments_proofofdelivery",
+    "shipments_ratecard",
+    "shipments_raterule",
+    "shipments_shipment",
+    "shipments_shipmentevent",
+    "shipments_shipmentlineitem",
+    "shipments_shipmentsequence",
+    "accounts_bankpaymentverification",
+    "accounts_expense",
+    "accounts_invoice",
+    "accounts_invoiceline",
+    "accounts_ledgerentry",
+    "accounts_paymentreceipt",
+]
+
+
+class TenantArchitectureTests(TestCase):
+    def test_tenant_owned_models_have_direct_company_field(self):
+        missing = []
+        for model in TENANT_OWNED_MODELS:
+            field_names = {field.name for field in model._meta.fields}
+            if "company" not in field_names:
+                missing.append(model._meta.label)
+
+        self.assertEqual(missing, [])
+
+    def test_tenant_owned_tables_use_composite_database_primary_key(self):
+        with connection.cursor() as cursor:
+            for table in TENANT_OWNED_TABLES:
+                constraints = connection.introspection.get_constraints(cursor, table)
+                primary_keys = [
+                    constraint
+                    for constraint in constraints.values()
+                    if constraint.get("primary_key")
+                ]
+                self.assertEqual(len(primary_keys), 1, table)
+                self.assertEqual(primary_keys[0]["columns"], ["company_id", "id"], table)
+
+    def test_tenant_owned_unique_constraints_include_company(self):
+        with connection.cursor() as cursor:
+            for table in TENANT_OWNED_TABLES:
+                constraints = connection.introspection.get_constraints(cursor, table)
+                invalid = [
+                    name
+                    for name, constraint in constraints.items()
+                    if constraint.get("unique")
+                    and not constraint.get("primary_key")
+                    and "company_id" not in constraint.get("columns", [])
+                ]
+                self.assertEqual(invalid, [], table)
 
 
 class OfficeRegistryArchitectureTests(TestCase):

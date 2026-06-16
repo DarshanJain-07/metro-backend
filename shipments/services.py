@@ -35,7 +35,7 @@ def lookup_rate(company, origin_office, destination_office, basis):
     ).filter(models.Q(effective_to__isnull=True) | models.Q(effective_to__gte=now)).order_by("-is_default", "-effective_from")
 
     for card in active_cards:
-        rules = RateRule.objects.filter(rate_card=card, is_active=True, basis=basis)
+        rules = RateRule.objects.filter(company=company, rate_card=card, is_active=True, basis=basis)
         rule = rules.filter(origin_office=origin_office, destination_office=destination_office).first()
         if rule:
             return rule
@@ -66,6 +66,7 @@ class ShipmentWorkflowService:
         if office.company_id != shipment.company_id:
             raise ValidationError("Event office must belong to the shipment company office master.")
         return ShipmentEvent.objects.create(
+            company=shipment.company,
             shipment=shipment,
             event_type=event_type,
             office=office,
@@ -140,6 +141,7 @@ class ShipmentWorkflowService:
             metadata={"delivery_user": delivery_user.id},
         )
         return DeliveryAssignment.objects.create(
+            company=shipment.company,
             shipment=shipment,
             delivery_user=delivery_user,
             assigned_by=assigned_by,
@@ -157,6 +159,7 @@ class ShipmentWorkflowService:
         shipment.status = Shipment.StatusChoices.DELIVERED
         shipment.save(update_fields=["status", "updated_at", "updated_by"])
         ProofOfDelivery.objects.create(
+            company=shipment.company,
             shipment=shipment,
             received_by_name=pod_data["received_by_name"],
             received_by_phone=pod_data["received_by_phone"],

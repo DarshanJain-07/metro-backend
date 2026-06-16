@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.conf import settings
 from django.contrib.postgres.indexes import GinIndex
 from django.core.validators import MinValueValidator, RegexValidator
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
@@ -156,6 +157,7 @@ class ShipmentLineItem(AuditBaseModel):
         PER_PIECE = "PER_PIECE", _("Per Piece")
         FLAT = "FLAT", _("Flat Rate")
 
+    company = models.ForeignKey("core.Company", related_name="shipment_line_items", on_delete=models.CASCADE)
     shipment = models.ForeignKey(Shipment, related_name="line_items", on_delete=models.CASCADE)
     item_type = models.CharField(max_length=50, choices=ItemTypeChoices.choices, default=ItemTypeChoices.GENERAL)
     package_type = models.CharField(max_length=50, choices=PackageTypeChoices.choices, default=PackageTypeChoices.BOX)
@@ -170,6 +172,16 @@ class ShipmentLineItem(AuditBaseModel):
 
     class Meta:
         ordering = ["id"]
+        indexes = [
+            models.Index(fields=["company", "shipment"], name="idx_line_item_tenant_ship"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.shipment_id and not self.company_id:
+            self.company_id = self.shipment.company_id
+        if self.rate_rule_id and self.rate_rule.company_id != self.company_id:
+            raise ValidationError("Rate rule must belong to the line item company.")
+        super().save(*args, **kwargs)
 
 
 class ShipmentEvent(AuditBaseModel):
@@ -181,6 +193,7 @@ class ShipmentEvent(AuditBaseModel):
         DELIVERED = "DELIVERED", _("Delivered")
         CANCELLED = "CANCELLED", _("Cancelled")
 
+    company = models.ForeignKey("core.Company", related_name="shipment_events", on_delete=models.CASCADE)
     shipment = models.ForeignKey(Shipment, related_name="events", on_delete=models.CASCADE)
     event_type = models.CharField(max_length=50, choices=EventType.choices)
     office = models.ForeignKey("core.CompanyOffice", related_name="shipment_events", on_delete=models.PROTECT)
@@ -192,9 +205,17 @@ class ShipmentEvent(AuditBaseModel):
     class Meta:
         ordering = ["-occurred_at", "-created_at"]
         indexes = [
+            models.Index(fields=["company", "shipment", "-occurred_at"], name="idx_event_tenant_ship_time"),
             models.Index(fields=["shipment", "-occurred_at"], name="idx_shipment_event_time"),
             models.Index(fields=["office", "event_type"], name="idx_event_office_type"),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.shipment_id and not self.company_id:
+            self.company_id = self.shipment.company_id
+        if self.office_id and self.office.company_id != self.company_id:
+            raise ValidationError("Event office must belong to the shipment company.")
+        super().save(*args, **kwargs)
 
 
 class DeliveryAssignment(AuditBaseModel):
@@ -203,6 +224,7 @@ class DeliveryAssignment(AuditBaseModel):
         COMPLETED = "COMPLETED", _("Completed")
         CANCELLED = "CANCELLED", _("Cancelled")
 
+    company = models.ForeignKey("core.Company", related_name="delivery_assignments", on_delete=models.CASCADE)
     shipment = models.ForeignKey(Shipment, related_name="delivery_assignments", on_delete=models.CASCADE)
     delivery_user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="assignments", on_delete=models.PROTECT)
     assigned_by = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="assigned_by", on_delete=models.PROTECT)
@@ -212,9 +234,18 @@ class DeliveryAssignment(AuditBaseModel):
 
     class Meta:
         ordering = ["-assigned_at"]
+        indexes = [
+            models.Index(fields=["company", "shipment", "status"], name="idx_assign_tenant_ship"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.shipment_id and not self.company_id:
+            self.company_id = self.shipment.company_id
+        super().save(*args, **kwargs)
 
 
 class ProofOfDelivery(AuditBaseModel):
+    company = models.ForeignKey("core.Company", related_name="proofs_of_delivery", on_delete=models.CASCADE)
     shipment = models.OneToOneField(Shipment, related_name="pod", on_delete=models.CASCADE)
     received_by_name = models.CharField(max_length=100)
     received_by_phone = models.CharField(
@@ -223,6 +254,16 @@ class ProofOfDelivery(AuditBaseModel):
     )
     delivery_notes = models.TextField(blank=True, null=True)
     delivered_at = models.DateTimeField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["company", "shipment"], name="unique_pod_per_company_shipment"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.shipment_id and not self.company_id:
+            self.company_id = self.shipment.company_id
+        super().save(*args, **kwargs)
 
 
 class RateCard(AuditBaseModel):
@@ -237,6 +278,7 @@ class RateCard(AuditBaseModel):
 
 
 class RateRule(AuditBaseModel):
+    company = models.ForeignKey("core.Company", related_name="rate_rules", on_delete=models.CASCADE)
     rate_card = models.ForeignKey(RateCard, related_name="rules", on_delete=models.CASCADE)
     origin_city = models.ForeignKey("core.City", related_name="rate_rules_origin", on_delete=models.CASCADE)
     destination_city = models.ForeignKey("core.City", related_name="rate_rules_destination", on_delete=models.CASCADE)
@@ -247,6 +289,20 @@ class RateRule(AuditBaseModel):
     rate = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal("0.00"))])
     min_charge = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"), validators=[MinValueValidator(Decimal("0.00"))])
     delivery_charge = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"), validators=[MinValueValidator(Decimal("0.00"))])
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["company", "rate_card", "basis"], name="idx_rate_rule_tenant_card"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.rate_card_id and not self.company_id:
+            self.company_id = self.rate_card.company_id
+        for office_attr in ("origin_office", "destination_office"):
+            office = getattr(self, office_attr)
+            if office and office.company_id != self.company_id:
+                raise ValidationError(f"{office_attr} must belong to the rate rule company.")
+        super().save(*args, **kwargs)
 
 
 class OfficeRatePolicy(AuditBaseModel):

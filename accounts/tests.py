@@ -7,7 +7,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from accounts.models import Invoice, InvoiceLine, PaymentReceipt
+from accounts.models import BankPaymentVerification, Invoice, InvoiceLine, PaymentReceipt
 from core.models import City, Company, CompanyOffice, Party, Role, State, UserMembership
 from shipments.models import Shipment
 
@@ -50,7 +50,32 @@ class BillingArchitectureTests(TestCase):
         line = InvoiceLine.objects.create(invoice=invoice, shipment=shipment, description="Freight", amount=Decimal("100.00"))
 
         self.assertEqual(line.shipment.lr_no, "LR001")
+        self.assertEqual(line.company_id, company.id)
         self.assertEqual(invoice.office, office)
+
+    def test_payment_verification_copies_company_from_receipt(self):
+        company = Company.objects.create(name="Metro Express")
+        state = State.objects.create(name="Maharashtra", code="MH")
+        city = City.objects.create(name="Mumbai", state=state)
+        office = CompanyOffice.objects.create(company=company, name="Mumbai Office", city=city)
+        party = Party.objects.create(company=company, name="Customer", phone="1234567890", city=city)
+        verifier = User.objects.create_user(username="verifier", password="pw", company=company, office=office)
+        receipt = PaymentReceipt.objects.create(
+            company=company,
+            office=office,
+            party=party,
+            amount=Decimal("100.00"),
+            payment_mode=PaymentReceipt.PaymentMode.BANK_TRANSFER,
+            received_at=timezone.now(),
+        )
+
+        verification = BankPaymentVerification.objects.create(
+            payment_receipt=receipt,
+            verified_by=verifier,
+            status=BankPaymentVerification.Status.VERIFIED,
+        )
+
+        self.assertEqual(verification.company_id, company.id)
 
 
 class BillingApiPermissionTests(TestCase):

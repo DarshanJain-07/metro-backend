@@ -58,7 +58,7 @@ class RateRuleViewSet(viewsets.ModelViewSet):
         company = get_current_company()
         if not company:
             return RateRule.objects.none()
-        return RateRule.objects.filter(rate_card__company=company).select_related(
+        return RateRule.objects.filter(company=company).select_related(
             "rate_card",
             "origin_city",
             "destination_city",
@@ -107,11 +107,12 @@ class ShipmentViewSet(
 
     def with_list_annotations(self, qs):
         latest_event = ShipmentEvent.unscoped_objects.filter(
-            shipment=OuterRef("pk")
+            company=OuterRef("company"),
+            shipment=OuterRef("pk"),
         ).order_by("-occurred_at", "-created_at")
 
         return qs.annotate(
-            is_billed=Exists(InvoiceLine.objects.filter(shipment=OuterRef("pk"))),
+            is_billed=Exists(InvoiceLine.objects.filter(company=OuterRef("company"), shipment=OuterRef("pk"))),
             latest_event_timestamp=Subquery(latest_event.values("occurred_at")[:1]),
         )
 
@@ -256,7 +257,7 @@ class ShipmentViewSet(
         for shipment in shipments:
             if shipment.basis != Shipment.BasisChoices.TBB:
                 return Response({"detail": f"Shipment {shipment.lr_no} is not TBB and cannot be billed."}, status=status.HTTP_400_BAD_REQUEST)
-            if shipment.invoice_lines.exists():
+            if shipment.invoice_lines.filter(company=company).exists():
                 return Response({"detail": f"Shipment {shipment.lr_no} is already billed."}, status=status.HTTP_400_BAD_REQUEST)
             if not shipment_participates_at_office(shipment, office):
                 return Response({"detail": f"Shipment {shipment.lr_no} does not participate in the billing office."}, status=status.HTTP_400_BAD_REQUEST)
@@ -281,6 +282,7 @@ class ShipmentViewSet(
             )
             for shipment in party_shipments:
                 InvoiceLine.objects.create(
+                    company=invoice.company,
                     invoice=invoice,
                     shipment=shipment,
                     description=f"Freight charges for LR {shipment.lr_no}",
@@ -423,7 +425,10 @@ class ShipmentViewSet(
             status__in=[Shipment.StatusChoices.DELIVERED, Shipment.StatusChoices.CANCELLED]
         )
         if office:
-            latest_event = ShipmentEvent.unscoped_objects.filter(shipment=OuterRef("pk")).order_by("-occurred_at", "-created_at")
+            latest_event = ShipmentEvent.unscoped_objects.filter(
+                company=OuterRef("company"),
+                shipment=OuterRef("pk"),
+            ).order_by("-occurred_at", "-created_at")
             qs = qs.annotate(
                 latest_event_type=Subquery(latest_event.values("event_type")[:1]),
                 latest_event_office_id=Subquery(latest_event.values("office_id")[:1]),

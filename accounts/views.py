@@ -233,7 +233,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 return Response({"error": "You can only generate invoices for your active office."}, status=status.HTTP_400_BAD_REQUEST)
 
         shipments = Shipment.objects.filter(id__in=data["shipments"], company=company).annotate(
-            is_billed=Exists(InvoiceLine.objects.filter(shipment=OuterRef("pk")))
+            is_billed=Exists(InvoiceLine.objects.filter(company=OuterRef("company"), shipment=OuterRef("pk")))
         )
         if shipments.count() != len(data["shipments"]):
             return Response({"error": "One or more shipments not found or invalid."}, status=status.HTTP_400_BAD_REQUEST)
@@ -258,6 +258,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
         )
         for shipment in shipments:
             InvoiceLine.objects.create(
+                company=invoice.company,
                 invoice=invoice,
                 shipment=shipment,
                 description=f"Freight charges for LR {shipment.lr_no}",
@@ -344,6 +345,7 @@ class PaymentReceiptViewSet(viewsets.ModelViewSet):
         receipt.status = new_status
         receipt.save(update_fields=["status", "updated_at", "updated_by"])
         BankPaymentVerification.objects.create(
+            company=receipt.company,
             payment_receipt=receipt,
             verified_by=request.user,
             status=new_status,

@@ -153,8 +153,7 @@ class RoleTemplateViewSet(viewsets.ViewSet):
 
     def list(self, request):
         seed_role_templates()
-        roles = [role for role, _label in Role.choices if role != Role.PLATFORM_ADMIN]
-        return Response([role_template_payload(role) for role in roles])
+        return Response([role_template_payload(role) for role, _label in Role.choices])
 
 
 class CompanyRolePermissionViewSet(viewsets.ViewSet):
@@ -164,7 +163,7 @@ class CompanyRolePermissionViewSet(viewsets.ViewSet):
         seed_role_templates()
         company = get_current_company()
         role = request.query_params.get("role")
-        roles = [role] if role else [item for item, _label in Role.choices if item != Role.PLATFORM_ADMIN]
+        roles = [role] if role else [item for item, _label in Role.choices]
         payload = []
         for role_name in roles:
             grants = effective_role_grants(company, role_name)

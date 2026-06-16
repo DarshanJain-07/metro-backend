@@ -35,7 +35,7 @@ class TenantOfficeScopedQuerysetMixin:
         from core.policies import active_office_ids, has_role
         from core.request_context import get_current_company
 
-        if user.is_superuser or has_role(user, roles=[Role.PLATFORM_ADMIN]):
+        if user.is_superuser:
             return qs
 
         company = get_current_company()

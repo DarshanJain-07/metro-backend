@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
@@ -30,6 +31,7 @@ class Invoice(AuditBaseModel):
 
 
 class InvoiceLine(AuditBaseModel):
+    company = models.ForeignKey("core.Company", related_name="invoice_lines", on_delete=models.CASCADE)
     invoice = models.ForeignKey(Invoice, related_name="lines", on_delete=models.CASCADE)
     shipment = models.ForeignKey("shipments.Shipment", related_name="invoice_lines", on_delete=models.SET_NULL, null=True, blank=True)
     description = models.CharField(max_length=255)
@@ -38,6 +40,17 @@ class InvoiceLine(AuditBaseModel):
     class Meta:
         verbose_name_plural = "Invoice Lines"
         ordering = ["id"]
+        indexes = [
+            models.Index(fields=["company", "invoice"], name="idx_invoice_line_tenant_inv"),
+            models.Index(fields=["company", "shipment"], name="idx_invoice_line_tenant_ship"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.invoice_id and not self.company_id:
+            self.company_id = self.invoice.company_id
+        if self.shipment_id and self.shipment.company_id != self.company_id:
+            raise ValidationError("Shipment must belong to the invoice company.")
+        super().save(*args, **kwargs)
 
 
 class PaymentReceipt(AuditBaseModel):
@@ -70,6 +83,7 @@ class BankPaymentVerification(AuditBaseModel):
         VERIFIED = "VERIFIED", _("Verified")
         REJECTED = "REJECTED", _("Rejected")
 
+    company = models.ForeignKey("core.Company", related_name="bank_payment_verifications", on_delete=models.CASCADE)
     payment_receipt = models.OneToOneField(PaymentReceipt, related_name="verification", on_delete=models.CASCADE)
     verified_by = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="verified_payments", on_delete=models.PROTECT)
     verified_at = models.DateTimeField(auto_now_add=True)
@@ -78,6 +92,14 @@ class BankPaymentVerification(AuditBaseModel):
 
     class Meta:
         verbose_name_plural = "Bank Payment Verifications"
+        constraints = [
+            models.UniqueConstraint(fields=["company", "payment_receipt"], name="unique_verification_per_company_receipt"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.payment_receipt_id and not self.company_id:
+            self.company_id = self.payment_receipt.company_id
+        super().save(*args, **kwargs)
 
 
 class LedgerEntry(AuditBaseModel):

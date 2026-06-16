@@ -34,7 +34,7 @@ class TenantManager(models.Manager):
 
         from core.policies import active_office_ids, has_role
 
-        if user.is_superuser or has_role(user, roles=[Role.PLATFORM_ADMIN]):
+        if user.is_superuser:
             return qs
 
         company = get_current_company()
@@ -278,7 +278,6 @@ class User(AbstractUser):
 
 
 class Role(models.TextChoices):
-    PLATFORM_ADMIN = "PLATFORM_ADMIN", _("Platform Admin")
     SUPER_ADMIN = "SUPER_ADMIN", _("Super Admin")
     BRANCH_ADMIN = "BRANCH_ADMIN", _("Branch Admin")
     BOOKING_USER = "BOOKING_USER", _("Booking User")

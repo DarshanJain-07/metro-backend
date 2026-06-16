@@ -215,7 +215,7 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
             "search_fields": ["name", "city__name", "phone"],
             "has_is_active": True,
             "company_scoped": True,
-            "select_related": ["city", "city__state", "global_office"],
+            "select_related": ["company", "city", "city__state", "global_office", "global_office__owner_company"],
         },
         "parties": {
             "model": Party,
@@ -255,6 +255,17 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
             include_inactive = self.request.query_params.get("include_inactive", "true") == "true"
             if not include_inactive:
                 qs = qs.filter(is_active=True)
+        if self.kwargs.get("resource") == "offices":
+            own_company_only = self.request.query_params.get("own_company_only", "false") == "true"
+            company = get_current_company()
+            if own_company_only:
+                qs = qs.filter(
+                    models.Q(global_office__isnull=True)
+                    | models.Q(global_office__owner_company__isnull=True)
+                    | models.Q(global_office__owner_company=company)
+                )
+            if "ordering" not in self.request.query_params:
+                qs = qs.order_by("global_office__owner_company__name", "name")
         return qs
 
     def perform_create(self, serializer):

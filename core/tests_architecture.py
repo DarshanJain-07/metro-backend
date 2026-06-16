@@ -184,6 +184,67 @@ class OfficeRegistryArchitectureTests(TestCase):
         office.refresh_from_db()
         self.assertIsNotNone(office.global_office_id)
 
+    def test_office_list_includes_owner_company_debug_field(self):
+        office = CompanyOffice.objects.create(
+            company=self.company,
+            name="Metro Mumbai Hub",
+            city=self.city,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(reverse("master-list", kwargs={"resource": "offices"}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        items = response.data.get("results", response.data)
+        item = next(row for row in items if row["id"] == office.id)
+        self.assertNotIn("company_name", item)
+        self.assertNotIn("office_type", item)
+        self.assertIsNone(item["owner_company_name"])
+
+    def test_office_list_can_filter_to_own_company_offices(self):
+        own_office = CompanyOffice.objects.create(
+            company=self.company,
+            name="Metro Own Hub",
+            city=self.city,
+            office_type=CompanyOffice.OfficeType.OWN,
+        )
+        current_company_global = GlobalOffice.objects.create(
+            name="Metro Partner-Marked Hub",
+            city=self.city,
+            owner_company=self.company,
+        )
+        partner_marked_own_office = CompanyOffice.objects.create(
+            company=self.company,
+            global_office=current_company_global,
+            name="Metro Partner-Marked Hub",
+            city=self.city,
+            office_type=CompanyOffice.OfficeType.PARTNER,
+        )
+        partner_global = GlobalOffice.objects.create(
+            name="Swift Partner Hub",
+            city=self.city,
+            owner_company=self.other_company,
+        )
+        partner_office = CompanyOffice.objects.create(
+            company=self.company,
+            global_office=partner_global,
+            name="Swift Partner Hub",
+            city=self.city,
+            office_type=CompanyOffice.OfficeType.PARTNER,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(
+            reverse("master-list", kwargs={"resource": "offices"}),
+            {"own_company_only": "true"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        item_ids = {item["id"] for item in response.data.get("results", response.data)}
+        self.assertIn(own_office.id, item_ids)
+        self.assertIn(partner_marked_own_office.id, item_ids)
+        self.assertNotIn(partner_office.id, item_ids)
+
 
 class PartyMasterDataApiTests(TestCase):
     def setUp(self):

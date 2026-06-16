@@ -75,7 +75,19 @@ class UserPermissionsTestCase(TestCase):
             ).exists()
         )
 
-    def test_assignable_branches_excludes_partner_discovery_offices(self):
+    def test_assignable_branches_use_owner_company_not_office_type(self):
+        own_global = GlobalOffice.objects.create(
+            name="Own Partner-Marked Hub",
+            city=self.city,
+            owner_company=self.company,
+        )
+        own_partner_marked_office = CompanyOffice.objects.create(
+            company=self.company,
+            global_office=own_global,
+            name="Own Partner-Marked Hub",
+            city=self.city,
+            office_type=CompanyOffice.OfficeType.PARTNER,
+        )
         partner_company = Company.objects.create(name="Partner Company")
         partner_global = GlobalOffice.objects.create(
             name="Partner Hub",
@@ -96,6 +108,7 @@ class UserPermissionsTestCase(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         branch_ids = {item["id"] for item in response.data}
         self.assertIn(self.office.id, branch_ids)
+        self.assertIn(own_partner_marked_office.id, branch_ids)
         self.assertNotIn(partner_office.id, branch_ids)
 
     def test_user_create_rejects_partner_discovery_default_branch(self):
@@ -136,6 +149,20 @@ class UserPermissionsTestCase(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         # Should only see users in their company
         self.assertTrue(len(response.data['results']) >= 2) # super_admin and normal_user
+
+    def test_inactive_default_branch_serializes_as_none(self):
+        self.office.is_active = False
+        self.office.save(update_fields=["is_active", "updated_at"])
+
+        self.client.force_authenticate(user=self.super_admin)
+        response = self.client.get(reverse("user-list"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        users = response.data["results"]
+        normal_user = next(item for item in users if item["id"] == self.normal_user.id)
+        self.assertIsNone(normal_user["branch"])
+        self.assertIsNone(normal_user["branch_name"])
+        self.assertIsNone(normal_user["office_name"])
 
     def test_normal_user_cannot_update_other_user(self):
         self.client.force_authenticate(user=self.normal_user)

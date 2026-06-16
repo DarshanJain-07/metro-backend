@@ -33,18 +33,23 @@ def assignable_user_offices(company):
         company=company,
         is_active=True,
         status=OfficeStatus.ACTIVE,
-        office_type__in=[CompanyOffice.OfficeType.OWN, CompanyOffice.OfficeType.MANUAL],
     ).filter(
         Q(global_office__isnull=True)
         | Q(global_office__owner_company__isnull=True)
         | Q(global_office__owner_company=company)
-    ).order_by("name")
+    ).order_by("global_office__owner_company__name", "name")
 
 
 def is_assignable_user_office(office, company):
     if not office:
         return True
     return assignable_user_offices(company).filter(pk=office.pk).exists()
+
+
+def display_user_office(office, company):
+    if company and office and not is_assignable_user_office(office, company):
+        return None
+    return office
 
 
 def validate_and_set_password(user, password):
@@ -94,6 +99,16 @@ class UserMembershipSerializer(serializers.ModelSerializer):
             {"code": code, "scope": scope}
             for code, scope in sorted(effective_membership_grants(obj).items())
         ]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        office = display_user_office(instance.office, get_current_company())
+        if office is None:
+            data["office"] = None
+            data["office_name"] = None
+            data["branch"] = None
+            data["branch_name"] = None
+        return data
 
     def validate(self, data):
         company = get_current_company()
@@ -175,6 +190,11 @@ class UserSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         company = get_current_company()
+        office = display_user_office(instance.office, company)
+        if office is None:
+            data["branch"] = None
+            data["branch_name"] = None
+            data["office_name"] = None
         memberships = instance.memberships.all()
         membership = next(
             (

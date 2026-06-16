@@ -50,6 +50,7 @@ class CompanyOfficeSerializer(serializers.ModelSerializer):
     city_name = serializers.ReadOnlyField(source="city.name")
     state_code = serializers.ReadOnlyField(source="city.state.code")
     global_office_name = serializers.ReadOnlyField(source="global_office.name", default=None)
+    owner_company_name = serializers.ReadOnlyField(source="global_office.owner_company.name", default=None)
 
     class Meta:
         model = CompanyOffice
@@ -58,11 +59,11 @@ class CompanyOfficeSerializer(serializers.ModelSerializer):
             "company",
             "global_office",
             "global_office_name",
+            "owner_company_name",
             "name",
             "city",
             "city_name",
             "state_code",
-            "office_type",
             "address",
             "contact_name",
             "phone",
@@ -78,6 +79,7 @@ class CompanyOfficeSerializer(serializers.ModelSerializer):
             "id",
             "company",
             "global_office_name",
+            "owner_company_name",
             "city_name",
             "state_code",
             "scope_type",

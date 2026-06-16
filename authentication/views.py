@@ -121,7 +121,12 @@ class UserViewSet(viewsets.ModelViewSet):
         company = get_current_company()
         if not company:
             return Response({"detail": "Active company context required."}, status=status.HTTP_400_BAD_REQUEST)
-        offices = assignable_user_offices(company).select_related("city", "city__state", "global_office")
+        offices = assignable_user_offices(company).select_related(
+            "city",
+            "city__state",
+            "global_office",
+            "global_office__owner_company",
+        )
         return Response(CompanyOfficeSerializer(offices, many=True).data)
 
 class UserMembershipViewSet(viewsets.ModelViewSet):

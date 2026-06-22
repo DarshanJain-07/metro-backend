@@ -201,6 +201,17 @@ class CompanyOffice(AuditBaseModel):
     city = models.ForeignKey(City, related_name="company_offices", on_delete=models.PROTECT)
     office_type = models.CharField(max_length=20, choices=OfficeType.choices, default=OfficeType.OWN)
     address = models.TextField(blank=True, null=True)
+    gst_number = models.CharField(
+        max_length=15,
+        blank=True,
+        null=True,
+        validators=[
+            RegexValidator(
+                r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$",
+                _("Invalid Indian GSTIN format."),
+            )
+        ],
+    )
     contact_name = models.CharField(max_length=255, blank=True, null=True)
     phone = models.CharField(
         max_length=10,
@@ -278,6 +289,7 @@ class User(AbstractUser):
 
 
 class Role(models.TextChoices):
+    METRO = "METRO", _("Metro")
     SUPER_ADMIN = "SUPER_ADMIN", _("Super Admin")
     BRANCH_ADMIN = "BRANCH_ADMIN", _("Branch Admin")
     BOOKING_USER = "BOOKING_USER", _("Booking User")

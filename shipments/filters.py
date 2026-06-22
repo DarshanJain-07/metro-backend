@@ -20,6 +20,7 @@ class ShipmentFilter(django_filters.FilterSet):
     party = django_filters.CharFilter(method="filter_by_party")
     basis = django_filters.ChoiceFilter(choices=Shipment.BasisChoices.choices)
     payment_type = django_filters.ChoiceFilter(choices=Shipment.PaymentTypeChoices.choices)
+    delivery_type = django_filters.ChoiceFilter(choices=Shipment.DeliveryTypeChoices.choices)
     status = django_filters.ChoiceFilter(choices=Shipment.StatusChoices.choices)
     is_billed = django_filters.BooleanFilter(method="filter_by_billed")
     exclude_paid = django_filters.BooleanFilter(method="filter_exclude_paid")

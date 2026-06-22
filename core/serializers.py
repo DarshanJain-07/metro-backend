@@ -65,6 +65,7 @@ class CompanyOfficeSerializer(serializers.ModelSerializer):
             "city_name",
             "state_code",
             "address",
+            "gst_number",
             "contact_name",
             "phone",
             "status",
@@ -87,6 +88,11 @@ class CompanyOfficeSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
+
+    def validate_gst_number(self, value):
+        if value:
+            return str(value).upper().strip()
+        return value
 
 
 class OfficeImportSerializer(serializers.Serializer):

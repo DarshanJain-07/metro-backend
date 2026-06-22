@@ -399,6 +399,31 @@ class ShipmentLifecycleApiTests(TestCase):
         self.assertNotIn(delivered.id, ids)
         self.assertNotIn(cancelled.id, ids)
 
+    def test_incoming_can_filter_door_delivery_shipments(self):
+        door_delivery = self.make_shipment(
+            lr_no="LR-DOOR-DELIVERY",
+            status=Shipment.StatusChoices.RECEIVED,
+            destination_office=self.transit,
+            delivery_type=Shipment.DeliveryTypeChoices.DOOR,
+        )
+        office_collection = self.make_shipment(
+            lr_no="LR-OFFICE-COLLECTION",
+            status=Shipment.StatusChoices.RECEIVED,
+            destination_office=self.transit,
+            delivery_type=Shipment.DeliveryTypeChoices.OFFICE,
+        )
+
+        self.client.force_authenticate(user=self.transit_user)
+        response = self.client.get(
+            reverse("shipment-incoming"),
+            {"delivery_type": Shipment.DeliveryTypeChoices.DOOR},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = {item["id"] for item in self.response_items(response)}
+        self.assertIn(door_delivery.id, ids)
+        self.assertNotIn(office_collection.id, ids)
+
     def test_rate_rule_queryset_and_validation_are_company_scoped(self):
         card = RateCard.objects.create(company=self.company, name="Default", effective_from=timezone.now(), is_default=True)
         other_card = RateCard.objects.create(company=self.other_company, name="Other", effective_from=timezone.now(), is_default=True)

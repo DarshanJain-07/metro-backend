@@ -18,6 +18,7 @@ from core.policies import (
     active_role_definitions,
     effective_membership_grants,
     effective_permissions_for_user,
+    is_metro_user,
     role_definition,
     role_requires_office,
     role_template_revision,
@@ -58,6 +59,17 @@ def validate_and_set_password(user, password):
     except ValidationError as exc:
         raise serializers.ValidationError({"password": list(exc.messages)})
     user.set_password(password)
+
+
+def can_manage_metro_role(request_user, company):
+    return bool(
+        request_user
+        and (request_user.is_superuser or request_user.is_owner or is_metro_user(request_user, company=company))
+    )
+
+
+def includes_metro_membership(memberships):
+    return any(membership.get("role") == Role.METRO for membership in memberships)
 
 
 class UserMembershipSerializer(serializers.ModelSerializer):
@@ -114,8 +126,15 @@ class UserMembershipSerializer(serializers.ModelSerializer):
         company = get_current_company()
         if not company:
             raise serializers.ValidationError({"company": "Active company context required."})
+        request_user = self.context.get("request").user if self.context.get("request") else None
         office = data.get("office", getattr(self.instance, "office", None))
         role = data.get("role", getattr(self.instance, "role", None))
+        current_role = getattr(self.instance, "role", None)
+        if (
+            (role == Role.METRO or current_role == Role.METRO)
+            and not can_manage_metro_role(request_user, company)
+        ):
+            raise serializers.ValidationError({"role": "Metro role assignments can only be changed by owners or Metro users."})
         if role and not role_definition(role):
             raise serializers.ValidationError({"role": "Invalid role."})
         if role and role_requires_office(role) and not office:
@@ -211,14 +230,24 @@ class UserSerializer(serializers.ModelSerializer):
         company = get_current_company()
         if not company:
             raise serializers.ValidationError({"company": "Active company context required."})
+        request_user = self.context.get("request").user if self.context.get("request") else None
         memberships = data.get("membership_inputs") or []
         office = data.get("office", getattr(self.instance, "office", None))
         role = data.get("role")
         current_membership = None
+        current_role = None
         if not role and self.instance:
             current_membership = self.instance.memberships.filter(company=company, is_active=True).first()
             role = current_membership.role if current_membership else None
             office = office or (current_membership.office if current_membership else None)
+        if self.instance and current_membership is None:
+            current_membership = self.instance.memberships.filter(company=company, is_active=True).first()
+        current_role = current_membership.role if current_membership else None
+        if (
+            (role == Role.METRO or current_role == Role.METRO or includes_metro_membership(memberships))
+            and not can_manage_metro_role(request_user, company)
+        ):
+            raise serializers.ValidationError({"role": "Metro users can only be changed by owners or Metro users."})
         if not self.instance and not memberships and not role:
             raise serializers.ValidationError({"membership_inputs": "At least one membership is required."})
         if role == "":
@@ -383,6 +412,8 @@ class CompanyRolePermissionOverrideSerializer(serializers.ModelSerializer):
     def validate_role(self, value):
         if not role_definition(value):
             raise serializers.ValidationError("Invalid role.")
+        if value == Role.METRO:
+            raise serializers.ValidationError("Metro permissions are built in and cannot be changed.")
         return value
 
     def create(self, validated_data):

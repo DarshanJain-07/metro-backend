@@ -6,6 +6,7 @@ from .views import (
     CompanyRolePermissionOverrideViewSet,
     CompanyRolePermissionViewSet,
     LoginView,
+    MeView,
     PermissionCatalogViewSet,
     RoleDefinitionViewSet,
     RoleTemplateViewSet,
@@ -24,6 +25,7 @@ router.register(r'company-role-overrides', CompanyRolePermissionOverrideViewSet,
 
 urlpatterns = [
     path('login/', LoginView.as_view(), name='login'),
+    path('me/', MeView.as_view(), name='me'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('token/verify/', TokenVerifyView.as_view(), name='token_verify'),
     path('change-password/', ChangePasswordView.as_view(), name='change_password'),

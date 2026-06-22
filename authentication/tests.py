@@ -3,6 +3,7 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
 from core.models import City, Company, CompanyOffice, GlobalOffice, Role, State, User, UserMembership
+from core.policies import can
 
 class UserPermissionsTestCase(TestCase):
     def setUp(self):
@@ -25,6 +26,14 @@ class UserPermissionsTestCase(TestCase):
 
         self.branch_admin = User.objects.create_user(username="branch_admin", password="password", company=self.company, office=self.office)
         UserMembership.objects.create(user=self.branch_admin, company=self.company, office=self.office, role=Role.BRANCH_ADMIN)
+
+        self.owner = User.objects.create_user(
+            username="owner",
+            password="password",
+            company=self.company,
+            is_owner=True,
+        )
+        UserMembership.objects.create(user=self.owner, company=self.company, role=Role.SUPER_ADMIN)
 
     def test_normal_user_cannot_create_user(self):
         self.client.force_authenticate(user=self.normal_user)
@@ -74,6 +83,62 @@ class UserPermissionsTestCase(TestCase):
                 is_active=True,
             ).exists()
         )
+
+    def test_owner_can_create_metro_user_without_branch(self):
+        self.client.force_authenticate(user=self.owner)
+        response = self.client.post(
+            reverse("user-list"),
+            {
+                "username": "metro_creator",
+                "password": "StrongPass123!",
+                "email": "metro_creator@test.com",
+                "role": Role.METRO,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        user = User.objects.get(username="metro_creator")
+        self.assertTrue(UserMembership.objects.filter(user=user, company=self.company, role=Role.METRO).exists())
+        self.assertTrue(can(user, "users:edit", company=self.company))
+
+    def test_super_admin_cannot_demote_metro_user(self):
+        metro_user = User.objects.create_user(username="metro_user", password="password", company=self.company)
+        UserMembership.objects.create(user=metro_user, company=self.company, role=Role.METRO)
+
+        self.client.force_authenticate(user=self.super_admin)
+        response = self.client.patch(
+            reverse("user-detail", kwargs={"pk": metro_user.pk}),
+            {"role": Role.VIEWER, "branch": self.office.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        metro_user.refresh_from_db()
+        self.assertTrue(UserMembership.objects.filter(user=metro_user, company=self.company, role=Role.METRO).exists())
+
+    def test_metro_role_permissions_are_immutable(self):
+        self.client.force_authenticate(user=self.owner)
+
+        roles_response = self.client.get(reverse("role-list"))
+        self.assertEqual(roles_response.status_code, status.HTTP_200_OK)
+        self.assertIn(Role.METRO, {item["code"] for item in roles_response.data})
+
+        permissions_response = self.client.get(reverse("company-role-permission-list"), {"role": Role.METRO})
+        self.assertEqual(permissions_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(permissions_response.data[0]["permissions"], [{"code": "*", "scope": "all"}])
+
+        override_response = self.client.post(
+            reverse("company-role-override-list"),
+            {
+                "role": Role.METRO,
+                "permission_code": "users:edit",
+                "enabled": False,
+                "scope": "company",
+            },
+            format="json",
+        )
+        self.assertEqual(override_response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_assignable_branches_use_owner_company_not_office_type(self):
         own_global = GlobalOffice.objects.create(

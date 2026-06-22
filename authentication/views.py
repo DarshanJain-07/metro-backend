@@ -45,7 +45,14 @@ class LoginView(generics.GenericAPIView):
     serializer_class = TokenObtainPairSerializer
 
     def post(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
+        data = request.data.copy()
+        identifier = data.get("username") or data.get("identifier") or data.get("email")
+        if identifier and "@" in identifier:
+            user = User.objects.filter(email__iexact=identifier).only("username").first()
+            if user:
+                data["username"] = user.username
+
+        serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
         user = serializer.user
         
@@ -60,6 +67,19 @@ class LoginView(generics.GenericAPIView):
             'refresh': serializer.validated_data['refresh'],
             'user': UserSerializer(user_with_relations).data
         })
+
+
+class MeView(generics.GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = User.objects.select_related('company', 'office').prefetch_related(
+            'memberships',
+            'memberships__company',
+            'memberships__office',
+        ).get(pk=request.user.pk)
+        return Response(UserSerializer(user).data)
+
 
 class ChangePasswordView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]

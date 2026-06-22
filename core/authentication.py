@@ -6,6 +6,25 @@ from core.request_context import set_current_company, set_current_office, set_cu
 from core.tenant_context import resolve_active_tenant_context
 
 
+def _apply_active_context(request, user):
+    try:
+        context = resolve_active_tenant_context(
+            user,
+            company_id=request.headers.get("X-Company-ID"),
+            office_id=request.headers.get("X-Office-ID"),
+        )
+    except DjangoValidationError as exc:
+        detail = exc.messages[0] if getattr(exc, "messages", None) else str(exc)
+        raise exceptions.ParseError(detail)
+
+    request.current_company = context.company
+    request.current_office = context.office
+    request.current_role = context.role
+    set_current_company(context.company)
+    set_current_office(context.office)
+    set_current_role(context.role)
+
+
 class ActiveContextJWTAuthentication(JWTAuthentication):
     def authenticate(self, request):
         result = super().authenticate(request)
@@ -13,20 +32,5 @@ class ActiveContextJWTAuthentication(JWTAuthentication):
             return None
 
         user, token = result
-        try:
-            context = resolve_active_tenant_context(
-                user,
-                company_id=request.headers.get("X-Company-ID"),
-                office_id=request.headers.get("X-Office-ID"),
-            )
-        except DjangoValidationError as exc:
-            detail = exc.messages[0] if getattr(exc, "messages", None) else str(exc)
-            raise exceptions.ParseError(detail)
-
-        request.current_company = context.company
-        request.current_office = context.office
-        request.current_role = context.role
-        set_current_company(context.company)
-        set_current_office(context.office)
-        set_current_role(context.role)
+        _apply_active_context(request, user)
         return user, token

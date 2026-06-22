@@ -212,7 +212,7 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
         "offices": {
             "model": CompanyOffice,
             "serializer_class": CompanyOfficeSerializer,
-            "search_fields": ["name", "city__name", "phone"],
+            "search_fields": ["name", "city__name", "phone", "address", "gst_number"],
             "has_is_active": True,
             "company_scoped": True,
             "select_related": ["company", "city", "city__state", "global_office", "global_office__owner_company"],

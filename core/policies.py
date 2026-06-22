@@ -16,6 +16,7 @@ from core.models import (
 
 
 DEFAULT_ROLE_DEFINITIONS = (
+    {"code": Role.METRO, "name": "Metro", "requires_office": False, "sort_order": 1},
     {"code": Role.SUPER_ADMIN, "name": "Super Admin", "requires_office": False, "sort_order": 10},
     {"code": Role.BRANCH_ADMIN, "name": "Branch Admin", "requires_office": True, "sort_order": 20},
     {"code": Role.BOOKING_USER, "name": "Booking User", "requires_office": True, "sort_order": 30},
@@ -59,6 +60,7 @@ PERMISSION_CATALOG = {
 }
 
 ROLE_PERMISSION_GRANTS = {
+    Role.METRO: {"*": PermissionScope.ALL},
     Role.SUPER_ADMIN: {"*": PermissionScope.COMPANY},
     Role.BRANCH_ADMIN: {
         "shipment:view": PermissionScope.BRANCH,
@@ -170,6 +172,10 @@ def has_role(user, company=None, office=None, roles=None):
         if membership.role in roles:
             return True
     return False
+
+
+def is_metro_user(user, company=None):
+    return bool(user and user.is_authenticated and has_role(user, company=company, roles={Role.METRO}))
 
 
 def active_office_ids(user, company):

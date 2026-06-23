@@ -16,13 +16,13 @@ from core.models import (
 
 
 DEFAULT_ROLE_DEFINITIONS = (
-    {"code": Role.METRO, "name": "Metro", "requires_office": False, "sort_order": 1},
-    {"code": Role.SUPER_ADMIN, "name": "Super Admin", "requires_office": False, "sort_order": 10},
-    {"code": Role.BRANCH_ADMIN, "name": "Branch Admin", "requires_office": True, "sort_order": 20},
-    {"code": Role.BOOKING_USER, "name": "Booking User", "requires_office": True, "sort_order": 30},
-    {"code": Role.DELIVERY_USER, "name": "Delivery User", "requires_office": True, "sort_order": 40},
-    {"code": Role.ACCOUNTANT, "name": "Accountant", "requires_office": True, "sort_order": 50},
-    {"code": Role.VIEWER, "name": "Viewer", "requires_office": True, "sort_order": 60},
+    {"code": Role.METRO, "workos_role_slug": "metro", "name": "Metro", "requires_office": False, "sort_order": 1},
+    {"code": Role.SUPER_ADMIN, "workos_role_slug": "super-admin", "name": "Super Admin", "requires_office": False, "sort_order": 10},
+    {"code": Role.BRANCH_ADMIN, "workos_role_slug": "branch-admin", "name": "Branch Admin", "requires_office": True, "sort_order": 20},
+    {"code": Role.BOOKING_USER, "workos_role_slug": "booking", "name": "Booking User", "requires_office": True, "sort_order": 30},
+    {"code": Role.DELIVERY_USER, "workos_role_slug": "delivery", "name": "Delivery User", "requires_office": True, "sort_order": 40},
+    {"code": Role.ACCOUNTANT, "workos_role_slug": "accountant", "name": "Accountant", "requires_office": True, "sort_order": 50},
+    {"code": Role.VIEWER, "workos_role_slug": "viewer", "name": "Viewer", "requires_office": True, "sort_order": 60},
 )
 
 PERMISSION_CATALOG = {
@@ -322,15 +322,19 @@ def seed_permission_catalog():
 def seed_role_definitions():
     for definition in DEFAULT_ROLE_DEFINITIONS:
         try:
-            RoleDefinition.objects.get_or_create(
+            role_definition_obj, _ = RoleDefinition.objects.get_or_create(
                 code=definition["code"],
                 defaults={
                     "name": definition["name"],
+                    "workos_role_slug": definition["workos_role_slug"],
                     "requires_office": definition["requires_office"],
                     "sort_order": definition["sort_order"],
                     "is_active": True,
                 },
             )
+            if not role_definition_obj.workos_role_slug:
+                role_definition_obj.workos_role_slug = definition["workos_role_slug"]
+                role_definition_obj.save(update_fields=["workos_role_slug"])
         except (DatabaseError, ProgrammingError):
             return
 
@@ -348,6 +352,7 @@ def default_role_definition_payloads():
         {
             "id": None,
             "code": definition["code"],
+            "workos_role_slug": definition["workos_role_slug"],
             "name": definition["name"],
             "description": "",
             "requires_office": definition["requires_office"],

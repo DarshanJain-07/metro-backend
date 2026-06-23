@@ -17,6 +17,7 @@ class Company(models.Model):
     name = models.CharField(max_length=255)
     created_at = models.DateTimeField(auto_now_add=True)
     is_active = models.BooleanField(default=True)
+    workos_organization_id = models.CharField(max_length=100, unique=True, null=True, blank=True, db_index=True)
 
     class Meta:
         verbose_name_plural = "Companies"
@@ -281,6 +282,7 @@ class User(AbstractUser):
     company = models.ForeignKey(Company, related_name="users", on_delete=models.CASCADE, null=True, blank=True)
     office = models.ForeignKey(CompanyOffice, related_name="users", on_delete=models.SET_NULL, null=True, blank=True)
     is_owner = models.BooleanField(default=False)
+    workos_user_id = models.CharField(max_length=100, unique=True, null=True, blank=True, db_index=True)
 
     class Meta:
         constraints = [
@@ -300,6 +302,7 @@ class Role(models.TextChoices):
 
 class RoleDefinition(models.Model):
     code = models.CharField(max_length=50, unique=True)
+    workos_role_slug = models.CharField(max_length=100, unique=True, null=True, blank=True)
     name = models.CharField(max_length=120)
     description = models.TextField(blank=True)
     requires_office = models.BooleanField(default=True)
@@ -390,6 +393,8 @@ class UserMembership(AuditBaseModel):
     company = models.ForeignKey(Company, related_name="memberships", on_delete=models.CASCADE)
     office = models.ForeignKey(CompanyOffice, related_name="memberships", on_delete=models.CASCADE, null=True, blank=True)
     role = models.CharField(max_length=50)
+    workos_organization_membership_id = models.CharField(max_length=100, null=True, blank=True, db_index=True)
+    workos_role_slug = models.CharField(max_length=100, null=True, blank=True)
 
     class Meta:
         constraints = [

@@ -8,7 +8,6 @@ from core.models import Company, Role, RoleDefinition, UserMembership
 
 DEFAULT_USERNAME = "metro"
 DEFAULT_EMAIL = "metroexpress456@gmail.com"
-DEFAULT_PASSWORD = "haguywt@@#q78286"
 DEFAULT_COMPANY = "Metro Logistics"
 
 
@@ -18,23 +17,23 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--username", default=os.environ.get("METRO_OWNER_USERNAME", DEFAULT_USERNAME))
         parser.add_argument("--email", default=os.environ.get("METRO_OWNER_EMAIL", DEFAULT_EMAIL))
-        parser.add_argument("--password", default=os.environ.get("METRO_OWNER_PASSWORD", DEFAULT_PASSWORD))
+        parser.add_argument("--password", default=os.environ.get("METRO_OWNER_PASSWORD", ""))
         parser.add_argument("--company", default=os.environ.get("METRO_OWNER_COMPANY_NAME", DEFAULT_COMPANY))
 
     def handle(self, *args, **options):
         username = options["username"].strip()
         email = options["email"].strip()
-        password = options["password"]
         company_name = options["company"].strip()
 
-        if not username or not email or not password or not company_name:
-            raise CommandError("Metro owner username, email, password, and company are required.")
+        if not username or not email or not company_name:
+            raise CommandError("Metro owner username, email, and company are required.")
 
         company, _ = Company.objects.get_or_create(name=company_name)
         RoleDefinition.objects.update_or_create(
             code=Role.METRO,
             defaults={
                 "name": "Metro",
+                "workos_role_slug": "metro",
                 "requires_office": False,
                 "sort_order": 1,
                 "is_active": True,
@@ -56,7 +55,7 @@ class Command(BaseCommand):
         user.company = company
         user.office = None
         user.is_owner = True
-        user.set_password(password)
+        user.set_unusable_password()
         user.save()
 
         user.memberships.filter(company=company).exclude(role=Role.METRO, office__isnull=True).update(is_active=False)

@@ -65,7 +65,7 @@ class Command(BaseCommand):
                 username=username,
                 defaults={'email': f'{username}@example.com', 'company': company, 'office': office, 'is_owner': is_owner}
             )
-            user.set_password('admin123' if is_owner else 'pass123')
+            user.set_unusable_password()
             user.save()
             UserMembership.objects.get_or_create(user=user, company=company, office=office, role=role)
             return user

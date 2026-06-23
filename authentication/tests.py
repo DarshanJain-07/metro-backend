@@ -1,7 +1,12 @@
+from unittest.mock import patch
+
+from django.test import override_settings
 from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
+from authentication.models import AuthAuditLog
+from authentication.workos_service import WorkOSPendingAuthentication
 from core.models import City, Company, CompanyOffice, GlobalOffice, Role, State, User, UserMembership
 from core.policies import can
 
@@ -263,7 +268,7 @@ class UserPermissionsTestCase(TestCase):
         response = self.client.patch(url, {"password": "NewStrongPass123!"}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.normal_user.refresh_from_db()
-        self.assertTrue(self.normal_user.check_password("NewStrongPass123!"))
+        self.assertFalse(self.normal_user.has_usable_password())
 
     def test_branch_admin_cannot_reset_branch_admin_password(self):
         other_branch_admin = User.objects.create_user(
@@ -314,7 +319,7 @@ class UserPermissionsTestCase(TestCase):
         response = self.client.patch(url, {"password": "NewStrongPass123!"}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.branch_admin.refresh_from_db()
-        self.assertTrue(self.branch_admin.check_password("NewStrongPass123!"))
+        self.assertFalse(self.branch_admin.has_usable_password())
 
     def test_membership_permissions(self):
         url = reverse('membership-list')
@@ -334,3 +339,140 @@ class UserPermissionsTestCase(TestCase):
         self.client.force_authenticate(user=self.super_admin)
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+
+@override_settings(
+    WORKOS_API_KEY="",
+    WORKOS_CLIENT_ID="",
+    WORKOS_AUTO_PROVISION_USERS=False,
+)
+class WorkOSAuthIntegrationTestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.company = Company.objects.create(
+            name="WorkOS Company",
+            workos_organization_id="org_123",
+        )
+        self.state = State.objects.create(name="WorkOS State", code="WS")
+        self.city = City.objects.create(name="WorkOS City", state=self.state)
+        self.office = CompanyOffice.objects.create(company=self.company, name="WorkOS Office", city=self.city)
+        self.user = User.objects.create_user(
+            username="workos_user",
+            email="worker@example.com",
+            password="legacy-password",
+            company=self.company,
+            office=self.office,
+        )
+        UserMembership.objects.create(
+            user=self.user,
+            company=self.company,
+            office=self.office,
+            role=Role.VIEWER,
+        )
+
+    def workos_auth_response(self, user_id="user_123", email="worker@example.com"):
+        return {
+            "user": {
+                "id": user_id,
+                "email": email,
+                "first_name": "WorkOS",
+                "last_name": "User",
+            },
+            "organization_id": "org_123",
+        }
+
+    def workos_membership(self, role_slug="viewer", status_value="active"):
+        return {
+            "id": "om_123",
+            "status": status_value,
+            "role_slug": role_slug,
+        }
+
+    @patch("authentication.workos_service.list_workos_memberships")
+    @patch("authentication.views.authenticate_with_password")
+    def test_password_login_syncs_workos_user_and_issues_metro_tokens(self, authenticate_with_password, list_memberships):
+        authenticate_with_password.return_value = self.workos_auth_response()
+        list_memberships.return_value = [self.workos_membership()]
+
+        response = self.client.post(
+            reverse("login_password"),
+            {"identifier": "worker@example.com", "password": "workos-password"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        self.assertIn("refresh", response.data)
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.workos_user_id, "user_123")
+        self.assertFalse(self.user.has_usable_password())
+        membership = self.user.memberships.get(company=self.company, office=self.office)
+        self.assertEqual(membership.workos_organization_membership_id, "om_123")
+        self.assertEqual(membership.workos_role_slug, "viewer")
+        self.assertTrue(AuthAuditLog.objects.filter(event_type="auth.login.password", status="SUCCESS").exists())
+
+    @patch("authentication.views.authenticate_with_password")
+    def test_password_login_returns_pending_mfa_state(self, authenticate_with_password):
+        authenticate_with_password.side_effect = WorkOSPendingAuthentication(
+            {
+                "status": "pending",
+                "type": "mfa_challenge",
+                "pending_authentication_token": "pat_123",
+                "authentication_factors": [{"id": "auth_factor_123", "type": "totp"}],
+            }
+        )
+
+        response = self.client.post(
+            reverse("login_password"),
+            {"identifier": "worker@example.com", "password": "workos-password"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.data["type"], "mfa_challenge")
+        self.assertEqual(response.data["pending_authentication_token"], "pat_123")
+        self.assertTrue(AuthAuditLog.objects.filter(event_type="auth.login.password", status="PENDING").exists())
+
+    @patch("authentication.views.authenticate_with_password")
+    def test_unknown_workos_user_is_rejected_without_auto_provisioning(self, authenticate_with_password):
+        authenticate_with_password.return_value = self.workos_auth_response(
+            user_id="user_unknown",
+            email="unknown@example.com",
+        )
+
+        response = self.client.post(
+            reverse("login_password"),
+            {"identifier": "unknown@example.com", "password": "workos-password"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(User.objects.filter(email="unknown@example.com").exists())
+        self.assertTrue(AuthAuditLog.objects.filter(event_type="auth.login.password", status="FAILURE").exists())
+
+    @patch("authentication.workos_service.list_workos_memberships")
+    @patch("authentication.workos_service.get_workos_user")
+    @patch("authentication.views.get_current_company")
+    def test_deprovisioned_workos_user_loses_access_on_sync(self, get_current_company, get_workos_user, list_memberships):
+        self.user.workos_user_id = "user_123"
+        self.user.set_unusable_password()
+        self.user.save(update_fields=["workos_user_id", "password"])
+        get_current_company.return_value = self.company
+        get_workos_user.return_value = self.workos_auth_response()["user"]
+        list_memberships.return_value = []
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(reverse("auth_sync"), {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(UserMembership.unscoped_objects.get(user=self.user, company=self.company).is_active)
+        self.assertTrue(AuthAuditLog.objects.filter(event_type="auth.sync", status="FAILURE").exists())
+
+    def test_legacy_django_password_login_is_deprecated(self):
+        response = self.client.post(
+            reverse("login"),
+            {"username": "workos_user", "password": "legacy-password"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_410_GONE)

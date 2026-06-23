@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 import os
+import json
 from datetime import timedelta
 from pathlib import Path
 from dotenv import load_dotenv
@@ -85,6 +86,8 @@ REST_FRAMEWORK = {
         'anon': '10/minute',
         'user': '1000/hour',
         'login_attempts': '5/min',
+        'otp_attempts': '5/min',
+        'oauth_attempts': '20/min',
     },
     'DEFAULT_FILTER_BACKENDS': (
         'django_filters.rest_framework.DjangoFilterBackend',
@@ -100,6 +103,36 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
 }
+
+WORKOS_API_KEY = os.environ.get('WORKOS_API_KEY', '')
+WORKOS_CLIENT_ID = os.environ.get('WORKOS_CLIENT_ID', '')
+WORKOS_REDIRECT_URI = os.environ.get('WORKOS_REDIRECT_URI', 'http://localhost:8000/api/v1/auth/login/google/callback/')
+WORKOS_FRONTEND_CALLBACK_URL = os.environ.get('WORKOS_FRONTEND_CALLBACK_URL', 'http://localhost:3000/sign-in')
+WORKOS_GOOGLE_STATE_TTL_SECONDS = int(os.environ.get('WORKOS_GOOGLE_STATE_TTL_SECONDS', '600'))
+WORKOS_GOOGLE_EXCHANGE_TTL_SECONDS = int(os.environ.get('WORKOS_GOOGLE_EXCHANGE_TTL_SECONDS', '300'))
+WORKOS_AUTO_PROVISION_USERS = os.environ.get('WORKOS_AUTO_PROVISION_USERS', 'False') == 'True'
+WORKOS_ROLE_MAPPING = {
+    'metro': 'METRO',
+    'owner': 'SUPER_ADMIN',
+    'admin': 'SUPER_ADMIN',
+    'super-admin': 'SUPER_ADMIN',
+    'super_admin': 'SUPER_ADMIN',
+    'manager': 'BRANCH_ADMIN',
+    'branch-admin': 'BRANCH_ADMIN',
+    'branch_admin': 'BRANCH_ADMIN',
+    'booking': 'BOOKING_USER',
+    'booking-user': 'BOOKING_USER',
+    'booking_user': 'BOOKING_USER',
+    'delivery': 'DELIVERY_USER',
+    'delivery-user': 'DELIVERY_USER',
+    'delivery_user': 'DELIVERY_USER',
+    'accountant': 'ACCOUNTANT',
+    'viewer': 'VIEWER',
+}
+try:
+    WORKOS_ROLE_MAPPING.update(json.loads(os.environ.get('WORKOS_ROLE_MAPPING', '{}')))
+except json.JSONDecodeError as exc:
+    raise ImportError("WORKOS_ROLE_MAPPING must be valid JSON.") from exc
 
 AUTHENTICATION_BACKENDS = (
     'authentication.backends.CaseInsensitiveModelBackend',

@@ -29,6 +29,55 @@ from core.request_context import get_current_company
 User = get_user_model()
 
 
+class PasswordLoginSerializer(serializers.Serializer):
+    identifier = serializers.CharField(required=False, allow_blank=False)
+    username = serializers.CharField(required=False, allow_blank=False)
+    email = serializers.EmailField(required=False)
+    password = serializers.CharField(write_only=True)
+
+    def validate(self, data):
+        identifier = data.get("identifier") or data.get("username") or data.get("email")
+        if not identifier:
+            raise serializers.ValidationError({"identifier": "Email or username is required."})
+        data["identifier"] = identifier
+        return data
+
+
+class OtpStartSerializer(serializers.Serializer):
+    identifier = serializers.CharField(required=False, allow_blank=False)
+    email = serializers.EmailField(required=False)
+
+    def validate(self, data):
+        identifier = data.get("identifier") or data.get("email")
+        if not identifier:
+            raise serializers.ValidationError({"identifier": "Email or username is required."})
+        data["identifier"] = identifier
+        return data
+
+
+class OtpVerifySerializer(OtpStartSerializer):
+    code = serializers.CharField(min_length=4, max_length=12, trim_whitespace=True)
+
+
+class MfaChallengeSerializer(serializers.Serializer):
+    authentication_factor_id = serializers.CharField()
+
+
+class MfaVerifySerializer(serializers.Serializer):
+    pending_authentication_token = serializers.CharField()
+    authentication_challenge_id = serializers.CharField()
+    code = serializers.CharField(min_length=4, max_length=12, trim_whitespace=True)
+
+
+class OrganizationSelectionSerializer(serializers.Serializer):
+    pending_authentication_token = serializers.CharField()
+    organization_id = serializers.CharField()
+
+
+class GoogleExchangeSerializer(serializers.Serializer):
+    exchange_code = serializers.CharField()
+
+
 def assignable_user_offices(company):
     return CompanyOffice.unscoped_objects.filter(
         company=company,
@@ -97,10 +146,12 @@ class UserMembershipSerializer(serializers.ModelSerializer):
             "branch",
             "branch_name",
             "role",
+            "workos_organization_membership_id",
+            "workos_role_slug",
             "permissions",
             "scoped_permissions",
         )
-        read_only_fields = ("company",)
+        read_only_fields = ("company", "workos_organization_membership_id", "workos_role_slug")
         extra_kwargs = {"user": {"required": False}}
 
     def get_permissions(self, obj):
@@ -177,6 +228,7 @@ class UserSerializer(serializers.ModelSerializer):
             "branch_name",
             "office_name",
             "role",
+            "workos_user_id",
             "is_superuser",
             "is_owner",
             "memberships",
@@ -188,6 +240,7 @@ class UserSerializer(serializers.ModelSerializer):
             "id",
             "is_superuser",
             "is_owner",
+            "workos_user_id",
             "company_name",
             "office_name",
             "memberships",
@@ -285,7 +338,9 @@ class UserSerializer(serializers.ModelSerializer):
         user.company = company
         user.office = office or next((membership.get("office") for membership in memberships if membership.get("office")), None)
         if password:
-            validate_and_set_password(user, password)
+            # WorkOS owns usable credentials. Metro accepts the field for old
+            # clients but never stores a Django password for app sign-in.
+            user.set_unusable_password()
         else:
             user.set_unusable_password()
         user.save()
@@ -309,7 +364,7 @@ class UserSerializer(serializers.ModelSerializer):
         if office_provided:
             instance.office = office
         if password:
-            validate_and_set_password(instance, password)
+            instance.set_unusable_password()
         instance.save()
         company = get_current_company()
         if memberships is not None:
@@ -375,7 +430,7 @@ class RoleTemplateSummarySerializer(serializers.Serializer):
 class RoleDefinitionSerializer(serializers.ModelSerializer):
     class Meta:
         model = RoleDefinition
-        fields = ("id", "code", "name", "description", "requires_office", "is_active", "sort_order")
+        fields = ("id", "code", "workos_role_slug", "name", "description", "requires_office", "is_active", "sort_order")
 
 
 class CompanyRolePermissionOverrideSerializer(serializers.ModelSerializer):

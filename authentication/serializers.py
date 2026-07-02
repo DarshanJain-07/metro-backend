@@ -75,7 +75,18 @@ class OrganizationSelectionSerializer(serializers.Serializer):
 
 
 class GoogleExchangeSerializer(serializers.Serializer):
-    exchange_code = serializers.CharField()
+    exchange_code = serializers.CharField(required=False)
+    code = serializers.CharField(required=False)
+    state = serializers.CharField(required=False)
+
+    def validate(self, data):
+        if data.get("exchange_code"):
+            return data
+        if data.get("code") and data.get("state"):
+            return data
+        raise serializers.ValidationError({
+            "exchange_code": "A cached exchange code or WorkOS code and state are required."
+        })
 
 
 def assignable_user_offices(company):

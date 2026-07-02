@@ -244,6 +244,7 @@ def normalize_pending_payload(payload):
 
 def handle_workos_exception(exc):
     payload = extract_error_payload(exc)
+    logger.info("WorkOS authentication failed: %s", scrub_metadata(payload))
     code = payload.get("code") or payload.get("error")
     if code in {
         "email_verification_required",

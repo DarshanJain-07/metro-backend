@@ -106,8 +106,8 @@ SIMPLE_JWT = {
 
 WORKOS_API_KEY = os.environ.get('WORKOS_API_KEY', '')
 WORKOS_CLIENT_ID = os.environ.get('WORKOS_CLIENT_ID', '')
-WORKOS_REDIRECT_URI = os.environ.get('WORKOS_REDIRECT_URI', 'http://localhost:8000/api/v1/auth/login/google/callback/')
-WORKOS_FRONTEND_CALLBACK_URL = os.environ.get('WORKOS_FRONTEND_CALLBACK_URL', 'http://localhost:3000/sign-in')
+WORKOS_REDIRECT_URI = os.environ.get('WORKOS_REDIRECT_URI', 'http://localhost:3000/auth/callback')
+WORKOS_FRONTEND_CALLBACK_URL = os.environ.get('WORKOS_FRONTEND_CALLBACK_URL', 'http://localhost:3000/auth/callback')
 WORKOS_GOOGLE_STATE_TTL_SECONDS = int(os.environ.get('WORKOS_GOOGLE_STATE_TTL_SECONDS', '600'))
 WORKOS_GOOGLE_EXCHANGE_TTL_SECONDS = int(os.environ.get('WORKOS_GOOGLE_EXCHANGE_TTL_SECONDS', '300'))
 WORKOS_AUTO_PROVISION_USERS = os.environ.get('WORKOS_AUTO_PROVISION_USERS', 'False') == 'True'
@@ -226,24 +226,36 @@ DATABASE_ROUTERS = ['core.routers.PrimaryReplicaRouter']
 if 'pytest' in sys.modules or 'test' in sys.argv:
     DATABASE_ROUTERS = []
 
-CACHES = {
-    'default': {
-        'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1'),
-        'OPTIONS': {
-            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-            'IGNORE_EXCEPTIONS': True,
+if DEBUG and os.environ.get('DJANGO_USE_REDIS_CACHE', 'False') != 'True':
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'metro-default-cache',
         },
-    },
-    'throttle': {
-        'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/2'),
-        'OPTIONS': {
-            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-            'IGNORE_EXCEPTIONS': True,
+        'throttle': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'metro-throttle-cache',
         },
     }
-}
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1'),
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+                'IGNORE_EXCEPTIONS': True,
+            },
+        },
+        'throttle': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/2'),
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+                'IGNORE_EXCEPTIONS': True,
+            },
+        }
+    }
 
 
 # Password validation

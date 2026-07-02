@@ -52,6 +52,7 @@ from .workos_service import (
     request_ip,
     request_user_agent,
     resolve_identifier_email,
+    scrub_metadata,
     sync_current_user_from_workos,
     sync_workos_authentication,
 )
@@ -113,6 +114,19 @@ def _pending_response(request, event_type, exc):
 
 def _workos_config_response():
     return Response({"detail": "Authentication is not configured."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+def _auth_failure_metadata(method, exc=None):
+    metadata = {"method": method}
+    if exc is not None:
+        metadata["exception"] = exc.__class__.__name__
+        message = str(exc)
+        if message:
+            metadata["message"] = message
+    payload = getattr(exc, "payload", None)
+    if payload:
+        metadata["workos_error"] = scrub_metadata(payload)
+    return metadata
 
 
 def _complete_workos_auth(request, auth_response, event_type):
@@ -360,8 +374,8 @@ class GoogleCallbackView(generics.GenericAPIView):
             )
             exchange_code = create_google_pending_exchange_code(exc.payload, redirect_url)
             return redirect(frontend_callback_url({"workos_exchange_code": exchange_code, "redirect_url": redirect_url}))
-        except (WorkOSAuthenticationFailed, WorkOSConfigurationError):
-            record_auth_event("auth.login.google.callback", "FAILURE", request, metadata={"method": "google"})
+        except (WorkOSAuthenticationFailed, WorkOSConfigurationError) as exc:
+            record_auth_event("auth.login.google.callback", "FAILURE", request, metadata=_auth_failure_metadata("google", exc))
             return redirect(frontend_callback_url({"auth_error": "google_failed", "redirect_url": redirect_url}))
 
 
@@ -373,10 +387,29 @@ class GoogleExchangeView(generics.GenericAPIView):
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        try:
-            payload = consume_google_exchange_code(serializer.validated_data["exchange_code"])
-        except WorkOSAuthenticationFailed:
-            return Response({"detail": GENERIC_AUTH_ERROR}, status=status.HTTP_401_UNAUTHORIZED)
+        if serializer.validated_data.get("code"):
+            redirect_url = "/dockets/new"
+            try:
+                redirect_url = consume_google_state(serializer.validated_data.get("state", ""))
+                auth_response = authenticate_with_code(serializer.validated_data["code"], request)
+                user = _sync_google_callback_auth(request, auth_response)
+                payload = {"user_id": user.id, "redirect_url": redirect_url}
+            except WorkOSPendingAuthentication as exc:
+                record_auth_event(
+                    "auth.login.google.callback",
+                    "PENDING",
+                    request,
+                    metadata={"method": "google", "pending_type": exc.payload.get("type")},
+                )
+                payload = {"pending": exc.payload, "redirect_url": redirect_url}
+            except (WorkOSAuthenticationFailed, WorkOSConfigurationError) as exc:
+                record_auth_event("auth.login.google.callback", "FAILURE", request, metadata=_auth_failure_metadata("google", exc))
+                return Response({"detail": GENERIC_AUTH_ERROR}, status=status.HTTP_401_UNAUTHORIZED)
+        else:
+            try:
+                payload = consume_google_exchange_code(serializer.validated_data["exchange_code"])
+            except WorkOSAuthenticationFailed:
+                return Response({"detail": GENERIC_AUTH_ERROR}, status=status.HTTP_401_UNAUTHORIZED)
 
         if payload.get("pending"):
             return Response(payload["pending"], status=status.HTTP_202_ACCEPTED)
@@ -400,6 +433,7 @@ class GoogleExchangeView(generics.GenericAPIView):
         return Response({
             **tokens,
             "user": UserSerializer(user).data,
+            "redirect_url": payload.get("redirect_url"),
         })
 
 

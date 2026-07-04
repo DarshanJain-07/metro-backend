@@ -1,14 +1,197 @@
 from unittest.mock import patch
 
+from django.core import mail
 from django.test import override_settings
 from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
-from authentication.models import AuthAuditLog
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+from rest_framework_simplejwt.tokens import RefreshToken
+from authentication.models import AuthAuditLog, SignupRequest
 from authentication.workos_service import WorkOSPendingAuthentication
 from core.models import City, Company, CompanyOffice, GlobalOffice, Role, State, User, UserMembership
 from core.policies import can
+
+
+class FakeWorkOSPage(dict):
+    @property
+    def data(self):
+        return self.get("data", [])
+
+
+class FakeWorkOSOrganizations:
+    def __init__(self):
+        self.created = []
+
+    def list_organizations(self, **kwargs):
+        return FakeWorkOSPage(data=[])
+
+    def create_organization(self, **kwargs):
+        organization = {"id": "org_signup_123", "name": kwargs["name"]}
+        self.created.append(kwargs)
+        return organization
+
+    def get_organization(self, organization_id):
+        return {"id": organization_id, "name": "Signup Co"}
+
+
+class FakeWorkOSUserManagement:
+    def __init__(self):
+        self.created = []
+        self.updated = []
+
+    def list_users(self, **kwargs):
+        return FakeWorkOSPage(data=[])
+
+    def create_user(self, **kwargs):
+        self.created.append(kwargs)
+        return {
+            "id": "user_signup_123",
+            "email": kwargs["email"],
+            "first_name": kwargs.get("first_name", ""),
+            "last_name": kwargs.get("last_name", ""),
+        }
+
+    def update_user(self, user_id, **kwargs):
+        self.updated.append((user_id, kwargs))
+        return {"id": user_id, "email": "new.user@example.com", **kwargs}
+
+    def get_user(self, user_id):
+        return {"id": user_id, "email": "new.user@example.com", "first_name": "New", "last_name": "User"}
+
+
+class FakeWorkOSOrganizationMembership:
+    def __init__(self):
+        self.created = []
+
+    def create_organization_membership(self, **kwargs):
+        self.created.append(kwargs)
+        return {"id": "om_signup_123", "status": "active"}
+
+
+class FakeWorkOSAuditLogs:
+    def create_event(self, **kwargs):
+        return None
+
+
+class FakeWorkOSClient:
+    def __init__(self):
+        self.organizations = FakeWorkOSOrganizations()
+        self.user_management = FakeWorkOSUserManagement()
+        self.organization_membership = FakeWorkOSOrganizationMembership()
+        self.audit_logs = FakeWorkOSAuditLogs()
+
+
+@override_settings(
+    WORKOS_API_KEY="sk_test",
+    WORKOS_CLIENT_ID="client_test",
+    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    METRO_OWNER_EMAIL="owner@example.com",
+)
+class SignupRequestTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.fake_workos = FakeWorkOSClient()
+
+    @patch("authentication.workos_service.get_workos_client")
+    def test_public_signup_creates_pending_workos_and_local_records(self, mock_workos_client):
+        mock_workos_client.return_value = self.fake_workos
+
+        response = self.client.post(
+            reverse("signup-request-list"),
+            {
+                "full_name": "New User",
+                "email": "new.user@example.com",
+                "company_name": "Signup Co",
+                "phone": "9999999999",
+                "message": "Need access",
+                "password": "StrongPass123!",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        signup = AuthAuditLog.objects.filter(event_type="auth.signup.create").first()
+        self.assertIsNotNone(signup)
+        company = Company.objects.get(name="Signup Co")
+        user = User.objects.get(email="new.user@example.com")
+        self.assertFalse(company.is_active)
+        self.assertFalse(user.is_active)
+        self.assertEqual(user.workos_user_id, "user_signup_123")
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["owner@example.com"])
+
+    @patch("authentication.workos_service.get_workos_client")
+    def test_public_signup_rejects_existing_active_user_email(self, mock_workos_client):
+        mock_workos_client.return_value = self.fake_workos
+        company = Company.objects.create(name="Existing Co")
+        existing = User.objects.create_user(
+            username="existing",
+            email="existing@example.com",
+            company=company,
+            is_active=True,
+        )
+
+        response = self.client.post(
+            reverse("signup-request-list"),
+            {
+                "full_name": "Existing User",
+                "email": "existing@example.com",
+                "company_name": "Existing Co",
+                "password": "StrongPass123!",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        existing.refresh_from_db()
+        self.assertTrue(existing.is_active)
+        self.assertFalse(self.fake_workos.user_management.created)
+
+    @patch("authentication.workos_service.get_workos_client")
+    def test_owner_can_approve_signup_into_local_and_workos_membership(self, mock_workos_client):
+        mock_workos_client.return_value = self.fake_workos
+        company = Company.objects.create(
+            name="Signup Co",
+            is_active=False,
+            workos_organization_id="org_signup_123",
+        )
+        user = User.objects.create_user(
+            username="new_user",
+            email="new.user@example.com",
+            company=company,
+            workos_user_id="user_signup_123",
+            is_active=False,
+        )
+        request = SignupRequest.objects.create(
+            full_name="New User",
+            email="new.user@example.com",
+            company_name="Signup Co",
+            company=company,
+            user=user,
+            workos_user_id="user_signup_123",
+            workos_organization_id="org_signup_123",
+        )
+        owner = User.objects.create_user(username="owner", email="owner@example.com", is_owner=True)
+        self.client.force_authenticate(user=owner)
+
+        response = self.client.post(
+            reverse("signup-request-approve", kwargs={"pk": request.pk}),
+            {"role": Role.SUPER_ADMIN},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        request.refresh_from_db()
+        company.refresh_from_db()
+        user.refresh_from_db()
+        self.assertEqual(request.status, SignupRequest.Status.APPROVED)
+        self.assertTrue(company.is_active)
+        self.assertTrue(user.is_active)
+        membership = UserMembership.objects.get(user=user, company=company, role=Role.SUPER_ADMIN)
+        self.assertEqual(membership.workos_organization_membership_id, "om_signup_123")
+        self.assertEqual(self.fake_workos.organization_membership.created[0]["organization_id"], "org_signup_123")
 
 class UserPermissionsTestCase(TestCase):
     def setUp(self):
@@ -476,3 +659,35 @@ class WorkOSAuthIntegrationTestCase(TestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_410_GONE)
+
+    def test_logout_blacklists_refresh_token(self):
+        refresh = RefreshToken.for_user(self.user)
+
+        response = self.client.post(
+            reverse("auth_logout"),
+            {"refresh": str(refresh)},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["revoked"])
+        self.assertTrue(
+            BlacklistedToken.objects.filter(token__jti=refresh["jti"]).exists()
+        )
+
+        refresh_response = self.client.post(
+            reverse("token_refresh"),
+            {"refresh": str(refresh)},
+            format="json",
+        )
+        self.assertEqual(refresh_response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_logout_is_idempotent_for_invalid_refresh_token(self):
+        response = self.client.post(
+            reverse("auth_logout"),
+            {"refresh": "not-a-refresh-token"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data["revoked"])

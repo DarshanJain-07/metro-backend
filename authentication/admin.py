@@ -1,6 +1,25 @@
 from django.contrib import admin
 
-from authentication.models import AuthAuditLog
+from authentication.models import AuthAuditLog, SignupRequest
+
+
+@admin.register(SignupRequest)
+class SignupRequestAdmin(admin.ModelAdmin):
+    list_display = ("email", "full_name", "company_name", "status", "created_at", "approved_at")
+    list_filter = ("status", "created_at", "approved_at")
+    search_fields = ("email", "full_name", "company_name", "workos_user_id", "workos_organization_id")
+    readonly_fields = (
+        "id",
+        "workos_user_id",
+        "workos_organization_id",
+        "workos_organization_membership_id",
+        "approved_by",
+        "approved_at",
+        "rejected_by",
+        "rejected_at",
+        "created_at",
+        "updated_at",
+    )
 
 
 @admin.register(AuthAuditLog)

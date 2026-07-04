@@ -10,6 +10,7 @@ from .views import (
     GoogleExchangeView,
     GoogleStartView,
     LoginView,
+    LogoutView,
     MfaChallengeView,
     MfaVerifyView,
     MeView,
@@ -20,6 +21,7 @@ from .views import (
     PermissionCatalogViewSet,
     RoleDefinitionViewSet,
     RoleTemplateViewSet,
+    SignupRequestViewSet,
     UserMembershipViewSet,
     UserViewSet,
 )
@@ -32,6 +34,7 @@ router.register(r'roles', RoleDefinitionViewSet, basename='role')
 router.register(r'role-templates', RoleTemplateViewSet, basename='role-template')
 router.register(r'company-role-permissions', CompanyRolePermissionViewSet, basename='company-role-permission')
 router.register(r'company-role-overrides', CompanyRolePermissionOverrideViewSet, basename='company-role-override')
+router.register(r'signup-requests', SignupRequestViewSet, basename='signup-request')
 
 urlpatterns = [
     path('login/', LoginView.as_view(), name='login'),
@@ -44,6 +47,7 @@ urlpatterns = [
     path('login/google/start/', GoogleStartView.as_view(), name='login_google_start'),
     path('login/google/callback/', GoogleCallbackView.as_view(), name='login_google_callback'),
     path('login/google/exchange/', GoogleExchangeView.as_view(), name='login_google_exchange'),
+    path('logout/', LogoutView.as_view(), name='auth_logout'),
     path('sync/', AuthSyncView.as_view(), name='auth_sync'),
     path('me/', MeView.as_view(), name='me'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),

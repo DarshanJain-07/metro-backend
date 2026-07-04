@@ -7,11 +7,14 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import AnonRateThrottle
 from django.contrib.auth import get_user_model
 from django.contrib.auth.signals import user_logged_in
+from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.tokens import RefreshToken
 from .serializers import (
     ChangePasswordSerializer,
     CompanyRolePermissionOverrideSerializer,
     GoogleExchangeSerializer,
+    LogoutSerializer,
     MfaChallengeSerializer,
     MfaVerifySerializer,
     OrganizationSelectionSerializer,
@@ -20,12 +23,16 @@ from .serializers import (
     PasswordLoginSerializer,
     PermissionCatalogSerializer,
     RoleDefinitionSerializer,
+    SignupApprovalSerializer,
+    SignupRejectSerializer,
+    SignupRequestCreateSerializer,
+    SignupRequestSerializer,
     UserMembershipSerializer,
     UserSerializer,
     assignable_user_offices,
     role_template_payload,
 )
-from .permissions import UserManagementPermission
+from .permissions import SignupRequestPermission, UserManagementPermission
 from .workos_service import (
     GENERIC_AUTH_ERROR,
     MetroAccessDenied,
@@ -55,7 +62,11 @@ from .workos_service import (
     scrub_metadata,
     sync_current_user_from_workos,
     sync_workos_authentication,
+    approve_pending_signup,
+    create_pending_signup,
+    notify_owner_of_signup,
 )
+from authentication.models import SignupRequest
 from core.models import CompanyRolePermissionOverride, PermissionCatalog, RoleDefinition, UserMembership
 from core.serializers import CompanyOfficeSerializer
 from core.policies import (
@@ -82,6 +93,11 @@ class OtpThrottle(AnonRateThrottle):
 
 class OAuthThrottle(AnonRateThrottle):
     scope = "oauth_attempts"
+    cache = caches["throttle"]
+
+
+class SignupThrottle(AnonRateThrottle):
+    scope = "signup_attempts"
     cache = caches["throttle"]
 
 
@@ -463,6 +479,137 @@ class AuthSyncView(generics.GenericAPIView):
         return Response(UserSerializer(user).data)
 
 
+class SignupRequestViewSet(viewsets.ModelViewSet):
+    queryset = SignupRequest.objects.select_related("company", "user").order_by("-created_at")
+    serializer_class = SignupRequestSerializer
+    http_method_names = ["get", "post", "head", "options"]
+
+    def get_permissions(self):
+        if self.action == "create":
+            return [AllowAny()]
+        return [SignupRequestPermission()]
+
+    def get_throttles(self):
+        if self.action == "create":
+            return [SignupThrottle()]
+        return super().get_throttles()
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return SignupRequestCreateSerializer
+        return SignupRequestSerializer
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        status_filter = self.request.query_params.get("status")
+        if status_filter:
+            queryset = queryset.filter(status=status_filter.upper())
+        if self.request.user.is_superuser or self.request.user.is_owner:
+            return queryset
+        company = get_current_company()
+        if company:
+            return queryset.filter(company=company)
+        return queryset.none()
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        password = serializer.validated_data.pop("password")
+        signup_request = serializer.save()
+        try:
+            signup_request = create_pending_signup(signup_request, password)
+            notify_owner_of_signup(signup_request, request=request)
+            record_auth_event(
+                "auth.signup.create",
+                "PENDING",
+                request,
+                target_user=signup_request.user,
+                company=signup_request.company,
+                workos_user_id=signup_request.workos_user_id,
+                workos_organization_id=signup_request.workos_organization_id,
+                metadata={"signup_request_id": signup_request.id},
+            )
+        except WorkOSConfigurationError:
+            signup_request.delete()
+            return _workos_config_response()
+        except Exception as exc:
+            signup_request.delete()
+            record_auth_event(
+                "auth.signup.create",
+                "FAILURE",
+                request,
+                metadata=_auth_failure_metadata("signup", exc),
+            )
+            return Response({"detail": "Could not complete signup. Please try again."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(SignupRequestSerializer(signup_request).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="approve")
+    def approve(self, request, pk=None):
+        signup_request = self.get_object()
+        serializer = SignupApprovalSerializer(
+            data=request.data,
+            context={"request": request, "signup_request": signup_request},
+        )
+        serializer.is_valid(raise_exception=True)
+        try:
+            signup_request = approve_pending_signup(
+                signup_request,
+                request.user,
+                role=serializer.validated_data["role"],
+                office=serializer.validated_data.get("office"),
+            )
+        except WorkOSConfigurationError:
+            return _workos_config_response()
+        except MetroAccessDenied as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            record_auth_event(
+                "auth.signup.approve",
+                "FAILURE",
+                request,
+                target_user=signup_request.user,
+                company=signup_request.company,
+                workos_user_id=signup_request.workos_user_id,
+                workos_organization_id=signup_request.workos_organization_id,
+                metadata=_auth_failure_metadata("signup_approve", exc),
+            )
+            return Response({"detail": "Could not approve signup."}, status=status.HTTP_400_BAD_REQUEST)
+        record_auth_event(
+            "auth.signup.approve",
+            "SUCCESS",
+            request,
+            actor=request.user,
+            target_user=signup_request.user,
+            company=signup_request.company,
+            workos_user_id=signup_request.workos_user_id,
+            workos_organization_id=signup_request.workos_organization_id,
+            metadata={"signup_request_id": signup_request.id},
+        )
+        return Response(SignupRequestSerializer(signup_request).data)
+
+    @action(detail=True, methods=["post"], url_path="reject")
+    def reject(self, request, pk=None):
+        signup_request = self.get_object()
+        serializer = SignupRejectSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if signup_request.status != SignupRequest.Status.PENDING:
+            return Response({"detail": "Signup request is not pending."}, status=status.HTTP_400_BAD_REQUEST)
+        signup_request.mark_rejected(request.user, serializer.validated_data.get("reason", ""))
+        signup_request.save()
+        record_auth_event(
+            "auth.signup.reject",
+            "SUCCESS",
+            request,
+            actor=request.user,
+            target_user=signup_request.user,
+            company=signup_request.company,
+            workos_user_id=signup_request.workos_user_id,
+            workos_organization_id=signup_request.workos_organization_id,
+            metadata={"signup_request_id": signup_request.id},
+        )
+        return Response(SignupRequestSerializer(signup_request).data)
+
+
 class MeView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
 
@@ -473,6 +620,24 @@ class MeView(generics.GenericAPIView):
             'memberships__office',
         ).get(pk=request.user.pk)
         return Response(UserSerializer(user).data)
+
+
+class LogoutView(generics.GenericAPIView):
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    serializer_class = LogoutSerializer
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        revoked = True
+        try:
+            RefreshToken(serializer.validated_data["refresh"]).blacklist()
+        except TokenError:
+            revoked = False
+
+        return Response({"ok": True, "revoked": revoked})
 
 
 class ChangePasswordView(generics.GenericAPIView):

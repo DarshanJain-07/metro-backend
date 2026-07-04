@@ -4,7 +4,9 @@ from django.core.exceptions import ValidationError
 from django.db.models import Q
 from rest_framework import serializers
 
+from authentication.models import SignupRequest
 from core.models import (
+    Company,
     CompanyRolePermissionOverride,
     CompanyOffice,
     OfficeStatus,
@@ -87,6 +89,107 @@ class GoogleExchangeSerializer(serializers.Serializer):
         raise serializers.ValidationError({
             "exchange_code": "A cached exchange code or WorkOS code and state are required."
         })
+
+
+class LogoutSerializer(serializers.Serializer):
+    refresh = serializers.CharField(write_only=True)
+
+
+class SignupRequestCreateSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(write_only=True, min_length=8, trim_whitespace=False)
+
+    class Meta:
+        model = SignupRequest
+        fields = ("id", "full_name", "email", "phone", "company_name", "message", "password", "status")
+        read_only_fields = ("id", "status")
+
+    def validate_email(self, value):
+        email = value.strip().lower()
+        if User.objects.filter(email__iexact=email, is_active=True).exists():
+            raise serializers.ValidationError("An account with this email already exists.")
+        if SignupRequest.objects.filter(email__iexact=email, status=SignupRequest.Status.PENDING).exists():
+            raise serializers.ValidationError("A signup for this email is already pending approval.")
+        if SignupRequest.objects.filter(email__iexact=email, status=SignupRequest.Status.APPROVED).exists():
+            raise serializers.ValidationError("An account with this email has already been approved.")
+        return email
+
+    def validate_password(self, value):
+        try:
+            validators.validate_password(value)
+        except ValidationError as exc:
+            raise serializers.ValidationError(list(exc.messages))
+        return value
+
+    def validate_company_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Company is required.")
+        return value
+
+    def validate_full_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Full name is required.")
+        return value
+
+
+class SignupRequestSerializer(serializers.ModelSerializer):
+    company = serializers.PrimaryKeyRelatedField(read_only=True)
+    company_id = serializers.ReadOnlyField()
+    user_id = serializers.ReadOnlyField()
+
+    class Meta:
+        model = SignupRequest
+        fields = (
+            "id",
+            "full_name",
+            "email",
+            "phone",
+            "company_name",
+            "message",
+            "company",
+            "company_id",
+            "user_id",
+            "status",
+            "workos_user_id",
+            "workos_organization_id",
+            "workos_organization_membership_id",
+            "approved_at",
+            "rejected_at",
+            "rejection_reason",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+
+class SignupApprovalSerializer(serializers.Serializer):
+    role = serializers.CharField()
+    branch = serializers.PrimaryKeyRelatedField(
+        source="office",
+        queryset=CompanyOffice.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+
+    def validate(self, data):
+        signup_request = self.context["signup_request"]
+        company = signup_request.company
+        role = data.get("role")
+        office = data.get("office")
+        if not role_definition(role):
+            raise serializers.ValidationError({"role": "Invalid role."})
+        if role_requires_office(role) and not office:
+            raise serializers.ValidationError({"branch": "Branch is required for this role."})
+        if not role_requires_office(role) and office:
+            raise serializers.ValidationError({"branch": "Company-level roles must not include a branch."})
+        if office and company and not is_assignable_user_office(office, company):
+            raise serializers.ValidationError({"branch": "Branch cannot be assigned to users for this company."})
+        return data
+
+
+class SignupRejectSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=False, allow_blank=True)
 
 
 def assignable_user_offices(company):

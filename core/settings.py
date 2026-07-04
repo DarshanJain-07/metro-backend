@@ -88,6 +88,7 @@ REST_FRAMEWORK = {
         'login_attempts': '5/min',
         'otp_attempts': '5/min',
         'oauth_attempts': '20/min',
+        'signup_attempts': '5/hour',
     },
     'DEFAULT_FILTER_BACKENDS': (
         'django_filters.rest_framework.DjangoFilterBackend',
@@ -111,6 +112,10 @@ WORKOS_FRONTEND_CALLBACK_URL = os.environ.get('WORKOS_FRONTEND_CALLBACK_URL', 'h
 WORKOS_GOOGLE_STATE_TTL_SECONDS = int(os.environ.get('WORKOS_GOOGLE_STATE_TTL_SECONDS', '600'))
 WORKOS_GOOGLE_EXCHANGE_TTL_SECONDS = int(os.environ.get('WORKOS_GOOGLE_EXCHANGE_TTL_SECONDS', '300'))
 WORKOS_AUTO_PROVISION_USERS = os.environ.get('WORKOS_AUTO_PROVISION_USERS', 'False') == 'True'
+METRO_OWNER_EMAIL = os.environ.get('METRO_OWNER_EMAIL', 'metroexpress456@gmail.com')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', METRO_OWNER_EMAIL)
+EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
+METRO_SIGNUP_REVIEW_URL = os.environ.get('METRO_SIGNUP_REVIEW_URL', 'http://localhost:3000/admin/users')
 WORKOS_ROLE_MAPPING = {
     'metro': 'METRO',
     'owner': 'SUPER_ADMIN',
@@ -193,6 +198,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'core.wsgi.application'
+ASGI_APPLICATION = 'core.asgi.application'
 
 
 # Database

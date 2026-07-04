@@ -1,16 +1,18 @@
 import logging
 import secrets
+import json
 from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.mail import send_mail
 from django.core import signing
 from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from authentication.models import AuthAuditLog
+from authentication.models import AuthAuditLog, SignupRequest
 from core.models import Company, Role, RoleDefinition, UserMembership
 from core.policies import role_requires_office, seed_role_templates
 
@@ -64,6 +66,18 @@ def get_workos_client():
         raise WorkOSConfigurationError("The workos package is not installed.") from exc
 
     return WorkOSClient(api_key=settings.WORKOS_API_KEY, client_id=settings.WORKOS_CLIENT_ID)
+
+
+def _workos_password(password):
+    from workos.user_management._resource import PasswordPlaintext
+
+    return PasswordPlaintext(password=password)
+
+
+def _workos_single_role(role_slug):
+    from workos.organization_membership import RoleSingle
+
+    return RoleSingle(role_slug=role_slug)
 
 
 def as_plain_data(value):
@@ -152,30 +166,44 @@ def record_auth_event(
     return audit_log
 
 
+def workos_audit_metadata(metadata):
+    clean = {}
+    for key, value in (metadata or {}).items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            clean[str(key)] = value
+        else:
+            clean[str(key)] = json.dumps(value, default=str)[:1000]
+    return clean
+
+
 def emit_workos_audit_event(audit_log):
+    from workos.audit_logs.models import AuditLogEvent, AuditLogEventActor, AuditLogEventContext
+
     client = get_workos_client()
     actor_id = audit_log.workos_user_id or (str(audit_log.actor_id) if audit_log.actor_id else "anonymous")
     target_id = audit_log.workos_user_id or (str(audit_log.target_user_id) if audit_log.target_user_id else actor_id)
-    event = {
-        "action": audit_log.event_type,
-        "occurred_at": audit_log.created_at.isoformat(),
-        "version": 1,
-        "actor": {
-            "type": "user" if audit_log.workos_user_id or audit_log.actor_id else "anonymous",
-            "id": actor_id,
-        },
-        "targets": [
-            {
-                "type": "user",
-                "id": target_id,
-            }
+    event = AuditLogEvent(
+        action=audit_log.event_type,
+        occurred_at=audit_log.created_at,
+        version=1,
+        actor=AuditLogEventActor(
+            type="user" if audit_log.workos_user_id or audit_log.actor_id else "anonymous",
+            id=actor_id,
+        ),
+        targets=[
+            AuditLogEventActor(
+                type="user",
+                id=target_id,
+            )
         ],
-        "context": {
-            "location": str(audit_log.ip_address or ""),
-            "user_agent": audit_log.user_agent,
-        },
-        "metadata": audit_log.metadata,
-    }
+        context=AuditLogEventContext(
+            location=str(audit_log.ip_address or ""),
+            user_agent=audit_log.user_agent,
+        ),
+        metadata=workos_audit_metadata(audit_log.metadata),
+    )
     client.audit_logs.create_event(
         organization_id=audit_log.company.workos_organization_id,
         event=event,
@@ -448,6 +476,233 @@ def _unique_username_from_email(email):
         suffix += 1
         username = f"{base[:135]}_{suffix}"
     return username
+
+
+def _split_full_name(full_name):
+    parts = (full_name or "").strip().split()
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
+
+
+def _first_page_item(page):
+    data = list(getattr(page, "data", []) or as_plain_data(page).get("data", []))
+    return data[0] if data else None
+
+
+def _workos_role_slug_for_metro_role(role):
+    seed_role_templates()
+    definition = RoleDefinition.objects.filter(code=role, is_active=True).first()
+    if definition and definition.workos_role_slug:
+        return definition.workos_role_slug
+    for slug, mapped_role in settings.WORKOS_ROLE_MAPPING.items():
+        if mapped_role == role:
+            return slug
+    return str(role).lower().replace("_", "-")
+
+
+def _find_or_create_workos_organization(company):
+    client = get_workos_client()
+    if company.workos_organization_id:
+        return client.organizations.get_organization(company.workos_organization_id)
+
+    existing = _first_page_item(client.organizations.list_organizations(search=company.name, limit=10))
+    existing_data = as_plain_data(existing)
+    if existing_data.get("id") and (existing_data.get("name") or "").strip().lower() == company.name.strip().lower():
+        company.workos_organization_id = existing_data["id"]
+        company.save(update_fields=["workos_organization_id"])
+        return existing
+
+    organization = client.organizations.create_organization(
+        name=company.name,
+        metadata={"metro_company_id": str(company.id)},
+    )
+    organization_data = as_plain_data(organization)
+    company.workos_organization_id = organization_data.get("id", "")
+    company.save(update_fields=["workos_organization_id"])
+    return organization
+
+
+def _find_or_create_workos_user(signup_request, password):
+    client = get_workos_client()
+    email = signup_request.email.strip().lower()
+    existing = _first_page_item(client.user_management.list_users(email=email, limit=1))
+    if existing:
+        first_name, last_name = _split_full_name(signup_request.full_name)
+        return client.user_management.update_user(
+            as_plain_data(existing)["id"],
+            first_name=first_name,
+            last_name=last_name,
+            name=signup_request.full_name,
+            metadata={
+                "metro_signup_request_id": str(signup_request.id),
+                "metro_company_name": signup_request.company_name,
+            },
+        )
+
+    first_name, last_name = _split_full_name(signup_request.full_name)
+    kwargs = {
+        "email": email,
+        "first_name": first_name,
+        "last_name": last_name,
+        "name": signup_request.full_name,
+        "email_verified": False,
+        "metadata": {
+            "metro_signup_request_id": str(signup_request.id),
+            "metro_company_name": signup_request.company_name,
+        },
+    }
+    if password:
+        kwargs["password"] = _workos_password(password)
+    return client.user_management.create_user(**kwargs)
+
+
+def _find_or_create_local_signup_company(company_name):
+    company = Company.objects.filter(name__iexact=company_name.strip()).first()
+    if company:
+        return company, False
+    return Company.objects.create(name=company_name.strip(), is_active=False), True
+
+
+def _ensure_local_signup_user(signup_request, workos_user):
+    workos_data = as_plain_data(workos_user)
+    email = (workos_data.get("email") or signup_request.email).strip().lower()
+    first_name, last_name = _split_full_name(signup_request.full_name)
+    user = None
+    workos_user_id = workos_data.get("id") or workos_data.get("user_id")
+    if workos_user_id:
+        user = User.objects.filter(workos_user_id=workos_user_id).first()
+    if not user:
+        user = User.objects.filter(email__iexact=email).first()
+    if not user:
+        user = User(
+            username=_unique_username_from_email(email),
+            email=email,
+        )
+    user.first_name = first_name
+    user.last_name = last_name
+    user.email = email
+    user.company = signup_request.company
+    user.workos_user_id = workos_user_id
+    user.is_active = False
+    user.set_unusable_password()
+    user.save()
+    return user
+
+
+def notify_owner_of_signup(signup_request, request=None):
+    owner_email = getattr(settings, "METRO_OWNER_EMAIL", "") or getattr(settings, "DEFAULT_FROM_EMAIL", "")
+    if not owner_email:
+        return
+    review_url = getattr(settings, "METRO_SIGNUP_REVIEW_URL", "")
+    body = "\n".join(
+        [
+            "A new Metro signup is waiting for approval.",
+            "",
+            f"Name: {signup_request.full_name}",
+            f"Email: {signup_request.email}",
+            f"Company: {signup_request.company_name}",
+            f"Phone: {signup_request.phone or '-'}",
+            "",
+            "Message:",
+            signup_request.message or "-",
+            "",
+            f"Signup request ID: {signup_request.id}",
+            f"Review URL: {review_url}" if review_url else "",
+        ]
+    ).strip()
+    send_mail(
+        subject=f"Metro signup approval needed - {signup_request.company_name}",
+        message=body,
+        from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
+        recipient_list=[owner_email],
+        fail_silently=True,
+    )
+
+
+@transaction.atomic
+def create_pending_signup(signup_request, password):
+    company, _ = _find_or_create_local_signup_company(signup_request.company_name)
+    signup_request.company = company
+    organization = _find_or_create_workos_organization(company)
+    workos_user = _find_or_create_workos_user(signup_request, password)
+    signup_request.workos_user_id = as_plain_data(workos_user).get("id") or as_plain_data(workos_user).get("user_id") or ""
+    signup_request.workos_organization_id = as_plain_data(organization).get("id") or ""
+    signup_request.user = _ensure_local_signup_user(signup_request, workos_user)
+    signup_request.save(
+        update_fields=[
+            "company",
+            "user",
+            "workos_user_id",
+            "workos_organization_id",
+            "updated_at",
+        ]
+    )
+    return signup_request
+
+
+@transaction.atomic
+def approve_pending_signup(signup_request, approver, *, role, office=None):
+    if signup_request.status != SignupRequest.Status.PENDING:
+        raise MetroAccessDenied("Signup request is not pending.")
+    if role_requires_office(role) and not office:
+        raise MetroAccessDenied("Office is required for this role.")
+    if not role_requires_office(role):
+        office = None
+
+    company = signup_request.company
+    if not company:
+        company, _ = _find_or_create_local_signup_company(signup_request.company_name)
+        signup_request.company = company
+
+    organization = _find_or_create_workos_organization(company)
+    organization_id = as_plain_data(organization).get("id") or company.workos_organization_id
+    if not signup_request.workos_user_id:
+        workos_user = _find_or_create_workos_user(signup_request, None)
+        signup_request.workos_user_id = as_plain_data(workos_user).get("id") or as_plain_data(workos_user).get("user_id") or ""
+
+    role_slug = _workos_role_slug_for_metro_role(role)
+    membership = get_workos_client().organization_membership.create_organization_membership(
+        user_id=signup_request.workos_user_id,
+        organization_id=organization_id,
+        role=_workos_single_role(role_slug),
+    )
+    membership_id = as_plain_data(membership).get("id", "")
+
+    company.is_active = True
+    company.workos_organization_id = organization_id
+    company.save(update_fields=["is_active", "workos_organization_id"])
+
+    user = signup_request.user
+    if not user:
+        workos_user = get_workos_client().user_management.get_user(signup_request.workos_user_id)
+        user = _ensure_local_signup_user(signup_request, workos_user)
+    user.company = company
+    user.office = office
+    user.is_active = True
+    user.save(update_fields=["company", "office", "is_active"])
+
+    UserMembership.unscoped_objects.update_or_create(
+        user=user,
+        company=company,
+        office=office,
+        role=role,
+        defaults={
+            "is_active": True,
+            "workos_organization_membership_id": membership_id,
+            "workos_role_slug": role_slug,
+        },
+    )
+
+    signup_request.user = user
+    signup_request.company = company
+    signup_request.workos_organization_id = organization_id
+    signup_request.workos_organization_membership_id = membership_id
+    signup_request.mark_approved(approver)
+    signup_request.save()
+    return signup_request
 
 
 def _role_slugs_from_membership(membership):

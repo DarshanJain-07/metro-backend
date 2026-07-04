@@ -104,3 +104,35 @@ class UserManagementPermission(permissions.BasePermission):
             return can(request.user, "users:edit", company=obj.company, office=office)
 
         return False
+
+
+class SignupRequestPermission(permissions.BasePermission):
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser or request.user.is_owner:
+            return True
+
+        from core.request_context import get_current_company, get_current_office
+
+        company = get_current_company()
+        if not company:
+            return False
+        office = get_current_office()
+        permission = "users:view" if request.method in permissions.SAFE_METHODS else "users:create"
+        return can(request.user, permission, company=company, office=office)
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_superuser or request.user.is_owner:
+            return True
+        company = getattr(obj, "company", None)
+        if not company:
+            return False
+
+        from core.request_context import get_current_company, get_current_office
+
+        active_company = get_current_company()
+        if not active_company or active_company.id != company.id:
+            return False
+        permission = "users:view" if request.method in permissions.SAFE_METHODS else "users:create"
+        return can(request.user, permission, company=company, office=get_current_office())

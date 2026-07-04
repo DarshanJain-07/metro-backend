@@ -4,6 +4,7 @@ import core.models
 import django.contrib.auth.models
 import django.contrib.auth.validators
 import django.contrib.postgres.indexes
+from django.contrib.postgres.operations import TrigramExtension
 import django.core.validators
 import django.db.models.deletion
 import django.db.models.functions.text
@@ -21,6 +22,7 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        TrigramExtension(),
         migrations.CreateModel(
             name='Company',
             fields=[

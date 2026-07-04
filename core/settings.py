@@ -35,6 +35,7 @@ elif not SECRET_KEY:
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DJANGO_DEBUG', 'False') == 'True'
+USE_REDIS_CACHE = os.environ.get('DJANGO_USE_REDIS_CACHE', 'False') == 'True'
 
 ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '127.0.0.1,localhost').split(',')
 
@@ -232,18 +233,7 @@ DATABASE_ROUTERS = ['core.routers.PrimaryReplicaRouter']
 if 'pytest' in sys.modules or 'test' in sys.argv:
     DATABASE_ROUTERS = []
 
-if DEBUG and os.environ.get('DJANGO_USE_REDIS_CACHE', 'False') != 'True':
-    CACHES = {
-        'default': {
-            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-            'LOCATION': 'metro-default-cache',
-        },
-        'throttle': {
-            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-            'LOCATION': 'metro-throttle-cache',
-        },
-    }
-else:
+if USE_REDIS_CACHE:
     CACHES = {
         'default': {
             'BACKEND': 'django_redis.cache.RedisCache',
@@ -260,7 +250,18 @@ else:
                 'CLIENT_CLASS': 'django_redis.client.DefaultClient',
                 'IGNORE_EXCEPTIONS': True,
             },
-        }
+        },
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'metro-default-cache',
+        },
+        'throttle': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'metro-throttle-cache',
+        },
     }
 
 

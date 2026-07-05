@@ -15,6 +15,7 @@ def generate_ulid():
 
 class Company(models.Model):
     name = models.CharField(max_length=255)
+    signup_code = models.CharField(max_length=26, unique=True, default=generate_ulid, editable=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     is_active = models.BooleanField(default=True)
     workos_organization_id = models.CharField(max_length=100, unique=True, null=True, blank=True, db_index=True)

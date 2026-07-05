@@ -97,15 +97,15 @@ class SignupRequestTests(TestCase):
     @patch("authentication.workos_service.get_workos_client")
     def test_public_signup_creates_pending_workos_and_local_records(self, mock_workos_client):
         mock_workos_client.return_value = self.fake_workos
+        company = Company.objects.create(name="Signup Co")
 
         response = self.client.post(
             reverse("signup-request-list"),
             {
                 "full_name": "New User",
                 "email": "new.user@example.com",
-                "company_name": "Signup Co",
+                "organization_id": company.signup_code,
                 "phone": "9999999999",
-                "message": "Need access",
                 "password": "StrongPass123!",
             },
             format="json",
@@ -114,9 +114,9 @@ class SignupRequestTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         signup = AuthAuditLog.objects.filter(event_type="auth.signup.create").first()
         self.assertIsNotNone(signup)
-        company = Company.objects.get(name="Signup Co")
+        company.refresh_from_db()
         user = User.objects.get(email="new.user@example.com")
-        self.assertFalse(company.is_active)
+        self.assertTrue(company.is_active)
         self.assertFalse(user.is_active)
         self.assertEqual(user.workos_user_id, "user_signup_123")
         self.assertEqual(len(mail.outbox), 1)
@@ -138,7 +138,8 @@ class SignupRequestTests(TestCase):
             {
                 "full_name": "Existing User",
                 "email": "existing@example.com",
-                "company_name": "Existing Co",
+                "organization_id": company.signup_code,
+                "phone": "9999999999",
                 "password": "StrongPass123!",
             },
             format="json",
@@ -147,6 +148,25 @@ class SignupRequestTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         existing.refresh_from_db()
         self.assertTrue(existing.is_active)
+        self.assertFalse(self.fake_workos.user_management.created)
+
+    def test_public_signup_validates_phone_and_workos_password_rules(self):
+        response = self.client.post(
+            reverse("signup-request-list"),
+            {
+                "full_name": "New User",
+                "email": "new.user@example.com",
+                "organization_id": "INVALIDORGANIZATIONID",
+                "phone": "12345",
+                "password": "weak",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("organization_id", response.data)
+        self.assertIn("phone", response.data)
+        self.assertIn("password", response.data)
         self.assertFalse(self.fake_workos.user_management.created)
 
     @patch("authentication.workos_service.get_workos_client")

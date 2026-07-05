@@ -1,3 +1,5 @@
+import re
+
 from django.contrib.auth import get_user_model
 import django.contrib.auth.password_validation as validators
 from django.core.exceptions import ValidationError
@@ -29,6 +31,11 @@ from core.policies import (
 from core.request_context import get_current_company
 
 User = get_user_model()
+
+WORKOS_PASSWORD_REQUIREMENT_MESSAGE = (
+    "Password must be at least 10 characters and include 1 uppercase letter, "
+    "1 lowercase letter, 1 number, and 1 special character."
+)
 
 
 class PasswordLoginSerializer(serializers.Serializer):
@@ -76,31 +83,18 @@ class OrganizationSelectionSerializer(serializers.Serializer):
     organization_id = serializers.CharField()
 
 
-class GoogleExchangeSerializer(serializers.Serializer):
-    exchange_code = serializers.CharField(required=False)
-    code = serializers.CharField(required=False)
-    state = serializers.CharField(required=False)
-
-    def validate(self, data):
-        if data.get("exchange_code"):
-            return data
-        if data.get("code") and data.get("state"):
-            return data
-        raise serializers.ValidationError({
-            "exchange_code": "A cached exchange code or WorkOS code and state are required."
-        })
-
-
 class LogoutSerializer(serializers.Serializer):
     refresh = serializers.CharField(write_only=True)
 
 
 class SignupRequestCreateSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, min_length=8, trim_whitespace=False)
+    organization_id = serializers.CharField(write_only=True, trim_whitespace=True)
+    phone = serializers.CharField(required=True, allow_blank=False, trim_whitespace=True)
+    password = serializers.CharField(write_only=True, min_length=10, trim_whitespace=False)
 
     class Meta:
         model = SignupRequest
-        fields = ("id", "full_name", "email", "phone", "company_name", "message", "password", "status")
+        fields = ("id", "full_name", "email", "phone", "organization_id", "password", "status")
         read_only_fields = ("id", "status")
 
     def validate_email(self, value):
@@ -114,17 +108,28 @@ class SignupRequestCreateSerializer(serializers.ModelSerializer):
         return email
 
     def validate_password(self, value):
-        try:
-            validators.validate_password(value)
-        except ValidationError as exc:
-            raise serializers.ValidationError(list(exc.messages))
+        if (
+            len(value) < 10
+            or not re.search(r"[A-Z]", value)
+            or not re.search(r"[a-z]", value)
+            or not re.search(r"\d", value)
+            or not re.search(r"[^A-Za-z0-9\s]", value)
+        ):
+            raise serializers.ValidationError(WORKOS_PASSWORD_REQUIREMENT_MESSAGE)
         return value
 
-    def validate_company_name(self, value):
-        value = value.strip()
-        if not value:
-            raise serializers.ValidationError("Company is required.")
-        return value
+    def validate_phone(self, value):
+        phone = value.strip()
+        if not re.fullmatch(r"\d{10}", phone):
+            raise serializers.ValidationError("Phone number must be exactly 10 digits.")
+        return phone
+
+    def validate_organization_id(self, value):
+        organization_id = value.strip().upper()
+        company = Company.objects.filter(signup_code=organization_id, is_active=True).first()
+        if not company:
+            raise serializers.ValidationError("Enter a valid organization ID.")
+        return organization_id
 
     def validate_full_name(self, value):
         value = value.strip()
@@ -132,10 +137,20 @@ class SignupRequestCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Full name is required.")
         return value
 
+    def create(self, validated_data):
+        organization_id = validated_data.pop("organization_id")
+        company = Company.objects.get(signup_code=organization_id, is_active=True)
+        return SignupRequest.objects.create(
+            **validated_data,
+            company=company,
+            company_name=company.name,
+        )
+
 
 class SignupRequestSerializer(serializers.ModelSerializer):
     company = serializers.PrimaryKeyRelatedField(read_only=True)
     company_id = serializers.ReadOnlyField()
+    organization_id = serializers.ReadOnlyField(source="company.signup_code")
     user_id = serializers.ReadOnlyField()
 
     class Meta:
@@ -146,7 +161,7 @@ class SignupRequestSerializer(serializers.ModelSerializer):
             "email",
             "phone",
             "company_name",
-            "message",
+            "organization_id",
             "company",
             "company_id",
             "user_id",
@@ -237,6 +252,7 @@ def includes_metro_membership(memberships):
 
 class UserMembershipSerializer(serializers.ModelSerializer):
     company_name = serializers.ReadOnlyField(source="company.name")
+    company_signup_code = serializers.ReadOnlyField(source="company.signup_code")
     office_name = serializers.ReadOnlyField(source="office.name", default=None)
     branch = serializers.PrimaryKeyRelatedField(
         source="office",
@@ -255,6 +271,7 @@ class UserMembershipSerializer(serializers.ModelSerializer):
             "user",
             "company",
             "company_name",
+            "company_signup_code",
             "office",
             "office_name",
             "branch",

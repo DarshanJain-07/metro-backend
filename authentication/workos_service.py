@@ -1,13 +1,9 @@
 import logging
-import secrets
 import json
-from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
-from django.core import signing
-from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -19,9 +15,6 @@ from core.policies import role_requires_office, seed_role_templates
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
-GOOGLE_STATE_SALT = "metro.authentication.workos.google.state"
-GOOGLE_STATE_CACHE_PREFIX = "workos:google_state:"
-GOOGLE_EXCHANGE_CACHE_PREFIX = "workos:google_exchange:"
 GENERIC_AUTH_ERROR = "Could not sign in. Please check your details."
 
 SENSITIVE_METADATA_KEYS = (
@@ -318,18 +311,6 @@ def authenticate_with_magic_auth(email, code, request):
         handle_workos_exception(exc)
 
 
-def authenticate_with_code(code, request):
-    client = get_workos_client()
-    try:
-        return client.user_management.authenticate_with_code(
-            code=code,
-            ip_address=request_ip(request),
-            user_agent=request_user_agent(request),
-        )
-    except Exception as exc:
-        handle_workos_exception(exc)
-
-
 def challenge_mfa_factor(authentication_factor_id):
     client = get_workos_client()
     try:
@@ -377,87 +358,6 @@ def list_workos_memberships(workos_user_id, workos_organization_id=None):
         kwargs["organization_id"] = workos_organization_id
     page = client.user_management.list_organization_memberships(**kwargs)
     return list(getattr(page, "data", []) or as_plain_data(page).get("data", []))
-
-
-def get_workos_authorization_url(state):
-    client = get_workos_client()
-    return client.user_management.get_authorization_url(
-        redirect_uri=settings.WORKOS_REDIRECT_URI,
-        provider="GoogleOAuth",
-        state=state,
-    )
-
-
-def normalize_redirect_path(value):
-    value = (value or "").strip()
-    if not value or not value.startswith("/") or value.startswith("//"):
-        return "/dockets/new"
-    if value == "/" or value.startswith("/sign-in"):
-        return "/dockets/new"
-    return value
-
-
-def create_google_state(redirect_url):
-    nonce = secrets.token_urlsafe(24)
-    cache_key = f"{GOOGLE_STATE_CACHE_PREFIX}{nonce}"
-    cache.set(cache_key, True, timeout=settings.WORKOS_GOOGLE_STATE_TTL_SECONDS)
-    return signing.dumps(
-        {"nonce": nonce, "redirect_url": normalize_redirect_path(redirect_url)},
-        salt=GOOGLE_STATE_SALT,
-    )
-
-
-def consume_google_state(state):
-    try:
-        payload = signing.loads(
-            state,
-            salt=GOOGLE_STATE_SALT,
-            max_age=settings.WORKOS_GOOGLE_STATE_TTL_SECONDS,
-        )
-    except signing.BadSignature as exc:
-        raise WorkOSAuthenticationFailed("Invalid sign-in state.") from exc
-
-    nonce = payload.get("nonce")
-    cache_key = f"{GOOGLE_STATE_CACHE_PREFIX}{nonce}"
-    if not nonce or not cache.get(cache_key):
-        raise WorkOSAuthenticationFailed("Invalid sign-in state.")
-    cache.delete(cache_key)
-    return normalize_redirect_path(payload.get("redirect_url"))
-
-
-def create_google_exchange_code(user, redirect_url):
-    code = secrets.token_urlsafe(32)
-    cache.set(
-        f"{GOOGLE_EXCHANGE_CACHE_PREFIX}{code}",
-        {"user_id": user.id, "redirect_url": normalize_redirect_path(redirect_url)},
-        timeout=settings.WORKOS_GOOGLE_EXCHANGE_TTL_SECONDS,
-    )
-    return code
-
-
-def create_google_pending_exchange_code(pending_payload, redirect_url):
-    code = secrets.token_urlsafe(32)
-    cache.set(
-        f"{GOOGLE_EXCHANGE_CACHE_PREFIX}{code}",
-        {"pending": pending_payload, "redirect_url": normalize_redirect_path(redirect_url)},
-        timeout=settings.WORKOS_GOOGLE_EXCHANGE_TTL_SECONDS,
-    )
-    return code
-
-
-def consume_google_exchange_code(exchange_code):
-    cache_key = f"{GOOGLE_EXCHANGE_CACHE_PREFIX}{exchange_code}"
-    payload = cache.get(cache_key)
-    if not payload:
-        raise WorkOSAuthenticationFailed("Invalid or expired sign-in code.")
-    cache.delete(cache_key)
-    return payload
-
-
-def frontend_callback_url(params):
-    query = urlencode(params)
-    separator = "&" if "?" in settings.WORKOS_FRONTEND_CALLBACK_URL else "?"
-    return f"{settings.WORKOS_FRONTEND_CALLBACK_URL}{separator}{query}"
 
 
 def _workos_user_id(workos_user):
@@ -559,13 +459,6 @@ def _find_or_create_workos_user(signup_request, password):
     return client.user_management.create_user(**kwargs)
 
 
-def _find_or_create_local_signup_company(company_name):
-    company = Company.objects.filter(name__iexact=company_name.strip()).first()
-    if company:
-        return company, False
-    return Company.objects.create(name=company_name.strip(), is_active=False), True
-
-
 def _ensure_local_signup_user(signup_request, workos_user):
     workos_data = as_plain_data(workos_user)
     email = (workos_data.get("email") or signup_request.email).strip().lower()
@@ -604,9 +497,6 @@ def notify_owner_of_signup(signup_request, request=None):
             f"Company: {signup_request.company_name}",
             f"Phone: {signup_request.phone or '-'}",
             "",
-            "Message:",
-            signup_request.message or "-",
-            "",
             f"Signup request ID: {signup_request.id}",
             f"Review URL: {review_url}" if review_url else "",
         ]
@@ -622,8 +512,11 @@ def notify_owner_of_signup(signup_request, request=None):
 
 @transaction.atomic
 def create_pending_signup(signup_request, password):
-    company, _ = _find_or_create_local_signup_company(signup_request.company_name)
+    company = signup_request.company
+    if not company:
+        raise MetroAccessDenied("A valid organization ID is required.")
     signup_request.company = company
+    signup_request.company_name = company.name
     organization = _find_or_create_workos_organization(company)
     workos_user = _find_or_create_workos_user(signup_request, password)
     signup_request.workos_user_id = as_plain_data(workos_user).get("id") or as_plain_data(workos_user).get("user_id") or ""
@@ -632,6 +525,7 @@ def create_pending_signup(signup_request, password):
     signup_request.save(
         update_fields=[
             "company",
+            "company_name",
             "user",
             "workos_user_id",
             "workos_organization_id",
@@ -652,8 +546,7 @@ def approve_pending_signup(signup_request, approver, *, role, office=None):
 
     company = signup_request.company
     if not company:
-        company, _ = _find_or_create_local_signup_company(signup_request.company_name)
-        signup_request.company = company
+        raise MetroAccessDenied("Signup request is not linked to a valid organization.")
 
     organization = _find_or_create_workos_organization(company)
     organization_id = as_plain_data(organization).get("id") or company.workos_organization_id

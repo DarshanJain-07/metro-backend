@@ -136,7 +136,6 @@ REST_FRAMEWORK = {
         'user': '1000/hour',
         'login_attempts': '5/min',
         'otp_attempts': '5/min',
-        'oauth_attempts': '20/min',
         'signup_attempts': '5/hour',
     },
     'DEFAULT_FILTER_BACKENDS': (
@@ -156,10 +155,6 @@ SIMPLE_JWT = {
 
 WORKOS_API_KEY = require_env('WORKOS_API_KEY')
 WORKOS_CLIENT_ID = require_env('WORKOS_CLIENT_ID')
-WORKOS_REDIRECT_URI = join_url(FRONTEND_URL, '/auth/callback')
-WORKOS_FRONTEND_CALLBACK_URL = WORKOS_REDIRECT_URI
-WORKOS_GOOGLE_STATE_TTL_SECONDS = 600
-WORKOS_GOOGLE_EXCHANGE_TTL_SECONDS = 300
 WORKOS_AUTO_PROVISION_USERS = False
 METRO_OWNER_EMAIL = 'metroexpress456@gmail.com'
 DEFAULT_FROM_EMAIL = METRO_OWNER_EMAIL

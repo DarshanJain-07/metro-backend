@@ -593,10 +593,8 @@ def _ensure_local_signup_user(signup_request, workos_user):
 
 
 def notify_owner_of_signup(signup_request, request=None):
-    owner_email = getattr(settings, "METRO_OWNER_EMAIL", "") or getattr(settings, "DEFAULT_FROM_EMAIL", "")
-    if not owner_email:
-        return
-    review_url = getattr(settings, "METRO_SIGNUP_REVIEW_URL", "")
+    owner_email = settings.METRO_OWNER_EMAIL
+    review_url = settings.METRO_SIGNUP_REVIEW_URL
     body = "\n".join(
         [
             "A new Metro signup is waiting for approval.",
@@ -616,7 +614,7 @@ def notify_owner_of_signup(signup_request, request=None):
     send_mail(
         subject=f"Metro signup approval needed - {signup_request.company_name}",
         message=body,
-        from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
+        from_email=settings.DEFAULT_FROM_EMAIL,
         recipient_list=[owner_email],
         fail_silently=True,
     )

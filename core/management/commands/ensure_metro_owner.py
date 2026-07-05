@@ -1,5 +1,3 @@
-import os
-
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 
@@ -15,10 +13,9 @@ class Command(BaseCommand):
     help = "Creates or updates the built-in Metro owner account."
 
     def add_arguments(self, parser):
-        parser.add_argument("--username", default=os.environ.get("METRO_OWNER_USERNAME", DEFAULT_USERNAME))
-        parser.add_argument("--email", default=os.environ.get("METRO_OWNER_EMAIL", DEFAULT_EMAIL))
-        parser.add_argument("--password", default=os.environ.get("METRO_OWNER_PASSWORD", ""))
-        parser.add_argument("--company", default=os.environ.get("METRO_OWNER_COMPANY_NAME", DEFAULT_COMPANY))
+        parser.add_argument("--username", default=DEFAULT_USERNAME)
+        parser.add_argument("--email", default=DEFAULT_EMAIL)
+        parser.add_argument("--company", default=DEFAULT_COMPANY)
 
     def handle(self, *args, **options):
         username = options["username"].strip()

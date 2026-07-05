@@ -11,9 +11,10 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 import os
-import json
+import sys
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -23,33 +24,80 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
 
 
+def require_env(name):
+    value = os.environ.get(name)
+    if not value:
+        raise ImportError(f"The {name} environment variable is required.")
+    return value
+
+
+def require_bool(name):
+    value = require_env(name).lower()
+    if value not in ('1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'):
+        raise ImportError(f"The {name} environment variable must be true or false.")
+    return value in ('1', 'true', 'yes', 'on')
+
+
+def get_url_host(url):
+    parsed = urlparse(url)
+    return parsed.hostname
+
+
+def join_url(base_url, path):
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+
+def unique(items):
+    return list(dict.fromkeys(items))
+
+
+def database_from_url(name):
+    url = require_env(name)
+    parsed = urlparse(url)
+    if parsed.scheme not in ('postgres', 'postgresql', 'postgresql+psycopg'):
+        raise ImportError(f"{name} must use a postgres:// or postgresql:// URL.")
+
+    return {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': unquote(parsed.path.lstrip('/')),
+        'USER': unquote(parsed.username or ''),
+        'PASSWORD': unquote(parsed.password or ''),
+        'HOST': parsed.hostname or '',
+        'PORT': str(parsed.port or 5432),
+    }
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY')
-if not SECRET_KEY and not os.environ.get('DJANGO_DEBUG', 'False') == 'True':
-    raise ImportError("The DJANGO_SECRET_KEY environment variable is required in production.")
-elif not SECRET_KEY:
-    raise ImportError("The DJANGO_SECRET_KEY environment variable is required in production.")
+SECRET_KEY = require_env('DJANGO_SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.environ.get('DJANGO_DEBUG', 'False') == 'True'
-USE_REDIS_CACHE = os.environ.get('DJANGO_USE_REDIS_CACHE', 'False') == 'True'
+DEBUG = require_bool('DJANGO_DEBUG')
 
-ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '127.0.0.1,localhost').split(',')
+FRONTEND_URL = require_env('FRONTEND_URL').rstrip('/')
+BACKEND_URL = require_env('BACKEND_URL').rstrip('/')
+REDIS_URL = require_env('REDIS_URL')
+
+BACKEND_HOST = get_url_host(BACKEND_URL)
+if not BACKEND_HOST:
+    raise ImportError("BACKEND_URL must be an absolute URL with a hostname.")
+
+ALLOWED_HOSTS = [BACKEND_HOST]
+if DEBUG:
+    ALLOWED_HOSTS = unique(ALLOWED_HOSTS + ['localhost', '127.0.0.1', '::1'])
 
 
 # Application definition
 
 # Celery Configuration
-CELERY_BROKER_URL = os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1')
-CELERY_RESULT_BACKEND = os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1')
+CELERY_BROKER_URL = REDIS_URL
+CELERY_RESULT_BACKEND = REDIS_URL
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 
-import sys
 if 'pytest' in sys.modules or 'test' in sys.argv:
     CELERY_TASK_ALWAYS_EAGER = True
 
@@ -100,23 +148,23 @@ REST_FRAMEWORK = {
 }
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=int(os.environ.get('JWT_ACCESS_TOKEN_MINUTES', '30'))),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=int(os.environ.get('JWT_REFRESH_TOKEN_DAYS', '7'))),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
 }
 
-WORKOS_API_KEY = os.environ.get('WORKOS_API_KEY', '')
-WORKOS_CLIENT_ID = os.environ.get('WORKOS_CLIENT_ID', '')
-WORKOS_REDIRECT_URI = os.environ.get('WORKOS_REDIRECT_URI', 'http://localhost:3000/auth/callback')
-WORKOS_FRONTEND_CALLBACK_URL = os.environ.get('WORKOS_FRONTEND_CALLBACK_URL', 'http://localhost:3000/auth/callback')
-WORKOS_GOOGLE_STATE_TTL_SECONDS = int(os.environ.get('WORKOS_GOOGLE_STATE_TTL_SECONDS', '600'))
-WORKOS_GOOGLE_EXCHANGE_TTL_SECONDS = int(os.environ.get('WORKOS_GOOGLE_EXCHANGE_TTL_SECONDS', '300'))
-WORKOS_AUTO_PROVISION_USERS = os.environ.get('WORKOS_AUTO_PROVISION_USERS', 'False') == 'True'
-METRO_OWNER_EMAIL = os.environ.get('METRO_OWNER_EMAIL', 'metroexpress456@gmail.com')
-DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', METRO_OWNER_EMAIL)
-EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
-METRO_SIGNUP_REVIEW_URL = os.environ.get('METRO_SIGNUP_REVIEW_URL', 'http://localhost:3000/admin/users')
+WORKOS_API_KEY = require_env('WORKOS_API_KEY')
+WORKOS_CLIENT_ID = require_env('WORKOS_CLIENT_ID')
+WORKOS_REDIRECT_URI = join_url(FRONTEND_URL, '/auth/callback')
+WORKOS_FRONTEND_CALLBACK_URL = WORKOS_REDIRECT_URI
+WORKOS_GOOGLE_STATE_TTL_SECONDS = 600
+WORKOS_GOOGLE_EXCHANGE_TTL_SECONDS = 300
+WORKOS_AUTO_PROVISION_USERS = False
+METRO_OWNER_EMAIL = 'metroexpress456@gmail.com'
+DEFAULT_FROM_EMAIL = METRO_OWNER_EMAIL
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+METRO_SIGNUP_REVIEW_URL = join_url(FRONTEND_URL, '/admin/users')
 WORKOS_ROLE_MAPPING = {
     'metro': 'METRO',
     'owner': 'SUPER_ADMIN',
@@ -135,11 +183,6 @@ WORKOS_ROLE_MAPPING = {
     'accountant': 'ACCOUNTANT',
     'viewer': 'VIEWER',
 }
-try:
-    WORKOS_ROLE_MAPPING.update(json.loads(os.environ.get('WORKOS_ROLE_MAPPING', '{}')))
-except json.JSONDecodeError as exc:
-    raise ImportError("WORKOS_ROLE_MAPPING must be valid JSON.") from exc
-
 AUTHENTICATION_BACKENDS = (
     'authentication.backends.CaseInsensitiveModelBackend',
     'django.contrib.auth.backends.ModelBackend',
@@ -163,10 +206,10 @@ MIDDLEWARE = [
 ]
 
 # LR format: {DD}{MM}{YY}{SEQ:3} to match requests like DDMMYY398.
-LR_FORMAT = os.environ.get('LR_FORMAT', '{DD}{MM}{YY}{SEQ:3}')
+LR_FORMAT = '{DD}{MM}{YY}{SEQ:3}'
 
 CORS_ALLOW_ALL_ORIGINS = False
-CORS_ALLOWED_ORIGINS = os.environ.get('DJANGO_CORS_ORIGINS', 'http://localhost:3000').split(',')
+CORS_ALLOWED_ORIGINS = [FRONTEND_URL]
 CORS_ALLOW_HEADERS = [
     'accept',
     'authorization',
@@ -206,63 +249,38 @@ ASGI_APPLICATION = 'core.asgi.application'
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.environ.get('METRO_DB_NAME', 'metro_default'),
-        'USER': os.environ.get('METRO_DB_USER', 'metro'),
-        'PASSWORD': os.environ.get('METRO_DB_PASSWORD', ''),
-        'HOST': os.environ.get('METRO_DB_HOST', 'localhost'),
-        'PORT': os.environ.get('METRO_DB_PORT', '5432'),
-    },
-    'replica': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.environ.get('METRO_REPLICA_DB_NAME', os.environ.get('METRO_DB_NAME', 'metro_default')),
-        'USER': os.environ.get('METRO_REPLICA_DB_USER', os.environ.get('METRO_DB_USER', 'metro')),
-        'PASSWORD': os.environ.get('METRO_REPLICA_DB_PASSWORD', os.environ.get('METRO_DB_PASSWORD', '')),
-        'HOST': os.environ.get('METRO_REPLICA_DB_HOST', os.environ.get('METRO_DB_HOST', 'localhost')),
-        'PORT': os.environ.get('METRO_REPLICA_DB_PORT', os.environ.get('METRO_DB_PORT', '5432')),
-        'TEST': {
-            'MIRROR': 'default',
-        }
-    }
+    'default': database_from_url('DATABASE_URL'),
 }
+
+if os.environ.get('REPLICA_DATABASE_URL'):
+    replica_database = database_from_url('REPLICA_DATABASE_URL')
+    replica_database['TEST'] = {'MIRROR': 'default'}
+    DATABASES['replica'] = replica_database
 
 import sys
 
-DATABASE_ROUTERS = ['core.routers.PrimaryReplicaRouter']
+DATABASE_ROUTERS = ['core.routers.PrimaryReplicaRouter'] if 'replica' in DATABASES else []
 if 'pytest' in sys.modules or 'test' in sys.argv:
     DATABASE_ROUTERS = []
 
-if USE_REDIS_CACHE:
-    CACHES = {
-        'default': {
-            'BACKEND': 'django_redis.cache.RedisCache',
-            'LOCATION': os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/1'),
-            'OPTIONS': {
-                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-                'IGNORE_EXCEPTIONS': True,
-            },
+CACHES = {
+    'default': {
+        'BACKEND': 'django_redis.cache.RedisCache',
+        'LOCATION': REDIS_URL,
+        'OPTIONS': {
+            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+            'IGNORE_EXCEPTIONS': True,
         },
-        'throttle': {
-            'BACKEND': 'django_redis.cache.RedisCache',
-            'LOCATION': os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/2'),
-            'OPTIONS': {
-                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-                'IGNORE_EXCEPTIONS': True,
-            },
+    },
+    'throttle': {
+        'BACKEND': 'django_redis.cache.RedisCache',
+        'LOCATION': REDIS_URL,
+        'OPTIONS': {
+            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+            'IGNORE_EXCEPTIONS': True,
         },
-    }
-else:
-    CACHES = {
-        'default': {
-            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-            'LOCATION': 'metro-default-cache',
-        },
-        'throttle': {
-            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-            'LOCATION': 'metro-throttle-cache',
-        },
-    }
+    },
+}
 
 
 # Password validation

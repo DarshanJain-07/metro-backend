@@ -459,6 +459,36 @@ def _find_or_create_workos_user(signup_request, password):
     return client.user_management.create_user(**kwargs)
 
 
+def _find_or_create_owner_workos_user(company, email, full_name, password):
+    client = get_workos_client()
+    email = email.strip().lower()
+    first_name, last_name = _split_full_name(full_name)
+    existing = _first_page_item(client.user_management.list_users(email=email, limit=1))
+    metadata = {
+        "metro_bootstrap_owner": "true",
+        "metro_company_id": str(company.id),
+        "metro_company_name": company.name,
+    }
+    if existing:
+        return client.user_management.update_user(
+            as_plain_data(existing)["id"],
+            first_name=first_name,
+            last_name=last_name,
+            name=full_name,
+            metadata=metadata,
+        )
+
+    return client.user_management.create_user(
+        email=email,
+        first_name=first_name,
+        last_name=last_name,
+        name=full_name,
+        email_verified=True,
+        password=_workos_password(password),
+        metadata=metadata,
+    )
+
+
 def _ensure_local_signup_user(signup_request, workos_user):
     workos_data = as_plain_data(workos_user)
     email = (workos_data.get("email") or signup_request.email).strip().lower()
@@ -483,6 +513,92 @@ def _ensure_local_signup_user(signup_request, workos_user):
     user.set_unusable_password()
     user.save()
     return user
+
+
+@transaction.atomic
+def bootstrap_owner_account(*, company_name, owner_email, owner_password, owner_name=""):
+    seed_role_templates()
+    company_name = company_name.strip()
+    owner_email = owner_email.strip().lower()
+    owner_name = (owner_name or owner_email.split("@", 1)[0]).strip()
+    if not company_name:
+        raise ValueError("company_name is required.")
+    if not owner_email:
+        raise ValueError("owner_email is required.")
+    if not owner_password:
+        raise ValueError("owner_password is required.")
+
+    company = Company.objects.filter(name__iexact=company_name).first()
+    company_created = company is None
+    if not company:
+        company = Company.objects.create(name=company_name, is_active=True)
+    if not company.is_active:
+        company.is_active = True
+        company.save(update_fields=["is_active"])
+
+    organization = _find_or_create_workos_organization(company)
+    organization_id = as_plain_data(organization).get("id") or company.workos_organization_id
+    if not organization_id:
+        raise WorkOSConfigurationError("WorkOS organization creation did not return an ID.")
+    workos_user = _find_or_create_owner_workos_user(company, owner_email, owner_name, owner_password)
+    workos_user_data = as_plain_data(workos_user)
+    workos_user_id = workos_user_data.get("id") or workos_user_data.get("user_id") or ""
+    if not workos_user_id:
+        raise WorkOSConfigurationError("WorkOS user creation did not return an ID.")
+
+    first_name, last_name = _split_full_name(owner_name)
+    user = None
+    if workos_user_id:
+        user = User.objects.filter(workos_user_id=workos_user_id).first()
+    if not user:
+        user = User.objects.filter(email__iexact=owner_email).first()
+    user_created = user is None
+    if not user:
+        user = User(username=_unique_username_from_email(owner_email))
+    user.email = owner_email
+    user.first_name = first_name
+    user.last_name = last_name
+    user.company = company
+    user.office = None
+    user.workos_user_id = workos_user_id
+    user.is_active = True
+    user.is_owner = True
+    user.is_staff = True
+    user.set_unusable_password()
+    user.save()
+
+    role_slug = _workos_role_slug_for_metro_role(Role.SUPER_ADMIN)
+    workos_membership = _active_membership_for_org(workos_user_id, organization_id) if workos_user_id else None
+    if not workos_membership:
+        workos_membership = get_workos_client().organization_membership.create_organization_membership(
+            user_id=workos_user_id,
+            organization_id=organization_id,
+            role=_workos_single_role(role_slug),
+        )
+    membership_id = as_plain_data(workos_membership).get("id", "")
+    membership, membership_created = UserMembership.unscoped_objects.update_or_create(
+        user=user,
+        company=company,
+        office=None,
+        role=Role.SUPER_ADMIN,
+        defaults={
+            "is_active": True,
+            "workos_organization_membership_id": membership_id,
+            "workos_role_slug": role_slug,
+        },
+    )
+    return {
+        "company": company,
+        "company_created": company_created,
+        "user": user,
+        "user_created": user_created,
+        "membership": membership,
+        "membership_created": membership_created,
+        "workos_organization_id": organization_id,
+        "workos_user_id": workos_user_id,
+        "workos_membership_id": membership_id,
+        "organization_id": company.signup_code,
+    }
 
 
 def notify_owner_of_signup(signup_request, request=None):

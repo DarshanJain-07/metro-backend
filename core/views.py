@@ -8,6 +8,8 @@ from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.import_export_api import ImportExportViewSetMixin, dataset_from_rows
+from core.import_export_resources import MASTER_IMPORT_EXPORT_RESOURCES
 from core.models import City, CompanyOffice, GlobalOffice, MasterScope, OfficeStatus, Party, State
 from core.policies import (
     active_office_ids,
@@ -103,6 +105,8 @@ class ActionModelPermission(BasePermission):
         "partial_update": "master:edit",
         "destroy": "master:delete",
         "import_rows": "master:import",
+        "import_file": "master:import",
+        "export_file": "master:view",
         "import_office": "master:import",
         "import_company_offices": "master:import",
         "refresh_from_global": "master:edit",
@@ -178,7 +182,7 @@ class DashboardStatsView(APIView):
         return Response(stats)
 
 
-class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftDeleteMixin, viewsets.ModelViewSet):
+class MasterDataViewSet(ImportExportViewSetMixin, IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftDeleteMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, ActionModelPermission]
     filter_backends = [SearchFilter, OrderingFilter]
     ordering_fields = "__all__"
@@ -232,6 +236,13 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
         if resource not in self.RESOURCE_CONFIG:
             raise Http404("Resource not found")
         return self.RESOURCE_CONFIG[resource]
+
+    def get_import_export_resource_class(self):
+        resource = self.kwargs.get("resource")
+        try:
+            return MASTER_IMPORT_EXPORT_RESOURCES[resource]
+        except KeyError:
+            raise Http404("Resource not found")
 
     @property
     def search_fields(self):
@@ -293,55 +304,9 @@ class MasterDataViewSet(IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftD
             raise serializers.ValidationError({"rows": "Expected a list of records."})
         if not rows:
             raise serializers.ValidationError({"rows": "At least one record is required."})
-
-        row_serializers = []
-        row_errors = []
-        for index, row in enumerate(rows, start=1):
-            serializer = self.get_serializer(data=row)
-            if serializer.is_valid():
-                row_serializers.append((index, serializer))
-            else:
-                row_errors.append({"row": index, "errors": serializer.errors})
-
-        if row_errors:
-            return Response({"errors": row_errors}, status=status.HTTP_400_BAD_REQUEST)
-
-        save_kwargs = {}
-        if config["company_scoped"]:
-            company = get_current_company()
-            if not company:
-                raise serializers.ValidationError({"detail": "Active company context required."})
-            save_kwargs["company"] = company
-            if hasattr(config["model"], "scope_type"):
-                scope_type, scope_id = active_master_scope(
-                    role=get_current_role(),
-                    office=get_current_office(request.user),
-                )
-                save_kwargs.update({"scope_type": scope_type, "scope_id": scope_id})
-
-        instances = []
-        try:
-            with transaction.atomic():
-                for index, serializer in row_serializers:
-                    try:
-                        instances.append(serializer.save(**save_kwargs))
-                    except IntegrityError:
-                        raise serializers.ValidationError(
-                            {
-                                "errors": [
-                                    {
-                                        "row": index,
-                                        "errors": [
-                                            "Could not save this row because it conflicts with existing data."
-                                        ],
-                                    }
-                                ]
-                            }
-                        )
-        except serializers.ValidationError as exc:
-            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
-
-        return Response(self.get_serializer(instances, many=True).data, status=status.HTTP_201_CREATED)
+        if config["company_scoped"] and not get_current_company():
+            raise serializers.ValidationError({"detail": "Active company context required."})
+        return self.run_dataset_import(dataset_from_rows(rows))
 
     @action(detail=False, methods=["post"], url_path="import")
     def import_office(self, request, resource=None):

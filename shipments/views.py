@@ -16,12 +16,14 @@ from accounts.models import Invoice, InvoiceLine, LedgerEntry
 from accounts.permissions import AccountantPermission
 from accounts.serializers import InvoiceSerializer
 from core.db_actor import set_database_actor
+from core.import_export_api import ImportExportViewSetMixin
 from core.models import CompanyOffice, Party
 from core.policies import can, can_manage_company, shipment_participates_at_office
 from core.request_context import get_current_company, get_current_office
 from core.viewsets import IdempotentCreateMixin, OptimisticConcurrencyMixin, SoftDeleteMixin, TenantOfficeScopedQuerysetMixin
 from .admin_serializers import OfficeRatePolicySerializer, RateCardSerializer, RateRuleSerializer
 from .filters import ShipmentFilter
+from .import_export_resources import OfficeRatePolicyResource, RateCardResource, RateRuleResource
 from .models import DeliveryAssignment, OfficeRatePolicy, RateCard, RateRule, Shipment, ShipmentEvent, ShipmentLineItem
 from .permissions import IsCompanyAdminPermission, StrictActionPermission
 from .serializers import (
@@ -35,10 +37,12 @@ from .services import ShipmentWorkflowService, lookup_rate
 from .utils import generate_lr_no
 
 
-class RateCardViewSet(viewsets.ModelViewSet):
+class RateCardViewSet(ImportExportViewSetMixin, viewsets.ModelViewSet):
     queryset = RateCard.objects.all()
     serializer_class = RateCardSerializer
     permission_classes = [IsCompanyAdminPermission]
+    import_export_resource_class = RateCardResource
+    export_filename = "rate-cards"
 
     def get_queryset(self):
         company = get_current_company()
@@ -50,10 +54,12 @@ class RateCardViewSet(viewsets.ModelViewSet):
         serializer.save(company=get_current_company())
 
 
-class RateRuleViewSet(viewsets.ModelViewSet):
+class RateRuleViewSet(ImportExportViewSetMixin, viewsets.ModelViewSet):
     queryset = RateRule.objects.all()
     serializer_class = RateRuleSerializer
     permission_classes = [IsCompanyAdminPermission]
+    import_export_resource_class = RateRuleResource
+    export_filename = "rate-rules"
 
     def get_queryset(self):
         company = get_current_company()
@@ -67,11 +73,16 @@ class RateRuleViewSet(viewsets.ModelViewSet):
             "destination_office",
         ).order_by("id")
 
+    def perform_create(self, serializer):
+        serializer.save(company=get_current_company())
 
-class OfficeRatePolicyViewSet(viewsets.ModelViewSet):
+
+class OfficeRatePolicyViewSet(ImportExportViewSetMixin, viewsets.ModelViewSet):
     queryset = OfficeRatePolicy.objects.all()
     serializer_class = OfficeRatePolicySerializer
     permission_classes = [IsCompanyAdminPermission]
+    import_export_resource_class = OfficeRatePolicyResource
+    export_filename = "office-rate-policies"
 
     def get_queryset(self):
         company = get_current_company()

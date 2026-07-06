@@ -584,11 +584,29 @@ def _is_workos_invalid_role_error(exc):
     return getattr(exc, "code", "") == "invalid_role" or "code=invalid_role" in str(exc)
 
 
-def _create_workos_organization_membership(*, user_id, organization_id, role_slug):
+def _create_workos_organization_membership(*, user_id, organization_id, role_slug=""):
     try:
-        return get_workos_client().organization_membership.create_organization_membership(
-            user_id=user_id,
-            organization_id=organization_id,
+        kwargs = {
+            "user_id": user_id,
+            "organization_id": organization_id,
+        }
+        if role_slug:
+            kwargs["role"] = _workos_single_role(role_slug)
+        return get_workos_client().organization_membership.create_organization_membership(**kwargs)
+    except Exception as exc:
+        if _is_workos_invalid_role_error(exc):
+            raise WorkOSConfigurationError(
+                "WorkOS rejected role slug "
+                f"'{role_slug}'. Set the matching WORKOS_*_ROLE_SLUG environment variable "
+                "to a role slug that exists in WorkOS, or create that role in WorkOS."
+            ) from exc
+        raise
+
+
+def _update_workos_organization_membership_role(membership_id, role_slug):
+    try:
+        return get_workos_client().organization_membership.update_organization_membership(
+            membership_id,
             role=_workos_single_role(role_slug),
         )
     except Exception as exc:
@@ -868,6 +886,22 @@ def create_pending_signup(signup_request, password):
     workos_user = _find_or_create_workos_user(signup_request, password)
     signup_request.workos_user_id = as_plain_data(workos_user).get("id") or as_plain_data(workos_user).get("user_id") or ""
     signup_request.workos_organization_id = as_plain_data(organization).get("id") or ""
+    if not signup_request.workos_user_id:
+        raise WorkOSConfigurationError("WorkOS user creation did not return an ID.")
+    if not signup_request.workos_organization_id:
+        raise WorkOSConfigurationError("WorkOS organization creation did not return an ID.")
+    workos_membership = _active_membership_for_org(
+        signup_request.workos_user_id,
+        signup_request.workos_organization_id,
+    )
+    if not workos_membership:
+        workos_membership = _create_workos_organization_membership(
+            user_id=signup_request.workos_user_id,
+            organization_id=signup_request.workos_organization_id,
+        )
+    signup_request.workos_organization_membership_id = as_plain_data(workos_membership).get("id", "")
+    if not signup_request.workos_organization_membership_id:
+        raise WorkOSConfigurationError("WorkOS organization membership creation did not return an ID.")
     signup_request.user = _ensure_local_signup_user(signup_request, workos_user)
     signup_request.status = SignupRequest.Status.EMAIL_VERIFICATION_PENDING
     send_signup_verification_email(signup_request.workos_user_id)
@@ -879,6 +913,7 @@ def create_pending_signup(signup_request, password):
             "status",
             "workos_user_id",
             "workos_organization_id",
+            "workos_organization_membership_id",
             "updated_at",
         ]
     )
@@ -924,11 +959,24 @@ def approve_pending_signup(signup_request, approver, *, role, office=None):
         signup_request.workos_user_id = as_plain_data(workos_user).get("id") or as_plain_data(workos_user).get("user_id") or ""
 
     role_slug = _workos_role_slug_for_metro_role(role)
-    membership = _create_workos_organization_membership(
-        user_id=signup_request.workos_user_id,
-        organization_id=organization_id,
-        role_slug=role_slug,
-    )
+    if signup_request.workos_organization_membership_id:
+        membership = _update_workos_organization_membership_role(
+            signup_request.workos_organization_membership_id,
+            role_slug,
+        )
+    else:
+        membership = _active_membership_for_org(signup_request.workos_user_id, organization_id)
+        if membership:
+            membership = _update_workos_organization_membership_role(
+                as_plain_data(membership).get("id", ""),
+                role_slug,
+            )
+        else:
+            membership = _create_workos_organization_membership(
+                user_id=signup_request.workos_user_id,
+                organization_id=organization_id,
+                role_slug=role_slug,
+            )
     membership_id = as_plain_data(membership).get("id", "")
 
     company.is_active = True

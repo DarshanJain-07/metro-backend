@@ -8,16 +8,15 @@ from rest_framework.test import APIClient
 from rest_framework import status
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 from rest_framework_simplejwt.tokens import RefreshToken
-from authentication.models import AuthAuditLog, SignupRequest
-from authentication.workos_service import WorkOSPendingAuthentication
+from authentication.models import AuthAuditLog, SignupRequest, UsernameEmailLookup
+from authentication.workos_service import (
+    WorkOSConfigurationError,
+    WorkOSPendingAuthentication,
+    _create_workos_organization_membership,
+    _workos_role_slug_for_metro_role,
+)
 from core.models import City, Company, CompanyOffice, GlobalOffice, Role, State, User, UserMembership
 from core.policies import can
-
-
-class FakeWorkOSPage(dict):
-    @property
-    def data(self):
-        return self.get("data", [])
 
 
 class FakeWorkOSOrganizations:
@@ -25,7 +24,7 @@ class FakeWorkOSOrganizations:
         self.created = []
 
     def list_organizations(self, **kwargs):
-        return FakeWorkOSPage(data=[])
+        return {"data": []}
 
     def create_organization(self, **kwargs):
         organization = {"id": "org_signup_123", "name": kwargs["name"]}
@@ -40,9 +39,11 @@ class FakeWorkOSUserManagement:
     def __init__(self):
         self.created = []
         self.updated = []
+        self.verification_emails = []
+        self.verified_emails = []
 
     def list_users(self, **kwargs):
-        return FakeWorkOSPage(data=[])
+        return {"data": []}
 
     def create_user(self, **kwargs):
         self.created.append(kwargs)
@@ -60,10 +61,21 @@ class FakeWorkOSUserManagement:
     def get_user(self, user_id):
         return {"id": user_id, "email": "new.user@example.com", "first_name": "New", "last_name": "User"}
 
+    def send_verification_email(self, user_id):
+        self.verification_emails.append(user_id)
+        return {"user": self.get_user(user_id)}
+
+    def verify_email(self, user_id, *, code):
+        self.verified_emails.append((user_id, code))
+        return {"user": self.get_user(user_id)}
+
 
 class FakeWorkOSOrganizationMembership:
     def __init__(self):
         self.created = []
+
+    def list_organization_memberships(self, **kwargs):
+        return {"data": []}
 
     def create_organization_membership(self, **kwargs):
         self.created.append(kwargs)
@@ -83,11 +95,25 @@ class FakeWorkOSClient:
         self.audit_logs = FakeWorkOSAuditLogs()
 
 
+class InvalidRoleError(Exception):
+    code = "invalid_role"
+
+
+class InvalidRoleWorkOSOrganizationMembership(FakeWorkOSOrganizationMembership):
+    def create_organization_membership(self, **kwargs):
+        raise InvalidRoleError("The role is invalid.")
+
+
+class InvalidRoleWorkOSClient(FakeWorkOSClient):
+    def __init__(self):
+        super().__init__()
+        self.organization_membership = InvalidRoleWorkOSOrganizationMembership()
+
+
 @override_settings(
     WORKOS_API_KEY="sk_test",
     WORKOS_CLIENT_ID="client_test",
     EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
-    METRO_OWNER_EMAIL="owner@example.com",
 )
 class SignupRequestTests(TestCase):
     def setUp(self):
@@ -95,7 +121,7 @@ class SignupRequestTests(TestCase):
         self.fake_workos = FakeWorkOSClient()
 
     @patch("authentication.workos_service.get_workos_client")
-    def test_public_signup_creates_pending_workos_and_local_records(self, mock_workos_client):
+    def test_public_signup_creates_workos_user_and_requires_email_verification(self, mock_workos_client):
         mock_workos_client.return_value = self.fake_workos
         company = Company.objects.create(name="Signup Co")
 
@@ -103,6 +129,7 @@ class SignupRequestTests(TestCase):
             reverse("signup-request-list"),
             {
                 "full_name": "New User",
+                "username": "newuser",
                 "email": "new.user@example.com",
                 "organization_id": company.signup_code,
                 "phone": "9999999999",
@@ -111,14 +138,70 @@ class SignupRequestTests(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(response.data["type"], "signup_email_verification_required")
+        self.assertTrue(response.data["signup_request_id"])
+        self.assertEqual(response.data["organization_id"], company.signup_code)
+        self.assertEqual(response.data["workos_organization_id"], "org_signup_123")
+        self.assertTrue(response.data["workos_membership_pending"])
         signup = AuthAuditLog.objects.filter(event_type="auth.signup.create").first()
         self.assertIsNotNone(signup)
         company.refresh_from_db()
         user = User.objects.get(email="new.user@example.com")
+        signup_request = SignupRequest.objects.get(email="new.user@example.com")
+        self.assertEqual(signup_request.status, SignupRequest.Status.EMAIL_VERIFICATION_PENDING)
         self.assertTrue(company.is_active)
         self.assertFalse(user.is_active)
         self.assertEqual(user.workos_user_id, "user_signup_123")
+        self.assertEqual(self.fake_workos.user_management.verification_emails, ["user_signup_123"])
+        self.assertFalse(UsernameEmailLookup.objects.filter(username="newuser").exists())
+        self.assertEqual(len(mail.outbox), 0)
+
+    @patch("authentication.workos_service.get_workos_client")
+    def test_public_signup_email_verification_moves_request_to_approval_pending(self, mock_workos_client):
+        mock_workos_client.return_value = self.fake_workos
+        company = Company.objects.create(name="Signup Co")
+        owner = User.objects.create_user(
+            username="owner",
+            email="owner@example.com",
+            company=company,
+            is_active=True,
+            is_owner=True,
+        )
+        UserMembership.unscoped_objects.create(
+            user=owner,
+            company=company,
+            role=Role.SUPER_ADMIN,
+            is_active=True,
+        )
+        create_response = self.client.post(
+            reverse("signup-request-list"),
+            {
+                "full_name": "New User",
+                "username": "newuser",
+                "email": "new.user@example.com",
+                "organization_id": company.signup_code,
+                "phone": "9999999999",
+                "password": "StrongPass123!",
+            },
+            format="json",
+        )
+
+        response = self.client.post(
+            reverse("signup-request-verify-email", kwargs={"pk": create_response.data["signup_request_id"]}),
+            {"code": "123456"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED, response.data)
+        self.assertEqual(response.data["type"], "access_approval_required")
+        self.assertEqual(response.data["organization_id"], company.signup_code)
+        self.assertEqual(response.data["workos_organization_id"], "org_signup_123")
+        self.assertTrue(response.data["workos_membership_pending"])
+        signup_request = SignupRequest.objects.get(email="new.user@example.com")
+        self.assertEqual(signup_request.status, SignupRequest.Status.PENDING)
+        self.assertEqual(self.fake_workos.user_management.verified_emails, [("user_signup_123", "123456")])
+        self.assertTrue(UsernameEmailLookup.objects.filter(username="newuser", email="new.user@example.com").exists())
         self.assertEqual(len(mail.outbox), 1)
         self.assertEqual(mail.outbox[0].to, ["owner@example.com"])
 
@@ -137,6 +220,7 @@ class SignupRequestTests(TestCase):
             reverse("signup-request-list"),
             {
                 "full_name": "Existing User",
+                "username": "existing_user",
                 "email": "existing@example.com",
                 "organization_id": company.signup_code,
                 "phone": "9999999999",
@@ -186,6 +270,7 @@ class SignupRequestTests(TestCase):
         )
         request = SignupRequest.objects.create(
             full_name="New User",
+            username="new_user",
             email="new.user@example.com",
             company_name="Signup Co",
             company=company,
@@ -212,6 +297,185 @@ class SignupRequestTests(TestCase):
         membership = UserMembership.objects.get(user=user, company=company, role=Role.SUPER_ADMIN)
         self.assertEqual(membership.workos_organization_membership_id, "om_signup_123")
         self.assertEqual(self.fake_workos.organization_membership.created[0]["organization_id"], "org_signup_123")
+        self.assertEqual(self.fake_workos.organization_membership.created[0]["role"].role_slug, "admin")
+
+    @override_settings(WORKOS_ROLE_SLUGS={"SUPER_ADMIN": "owner"})
+    def test_workos_role_slug_prefers_configured_slug(self):
+        self.assertEqual(_workos_role_slug_for_metro_role(Role.SUPER_ADMIN), "owner")
+
+    @patch("authentication.workos_service.get_workos_client")
+    def test_invalid_workos_role_raises_configuration_error(self, mock_workos_client):
+        mock_workos_client.return_value = InvalidRoleWorkOSClient()
+
+        with self.assertRaisesMessage(WorkOSConfigurationError, "invalid-role"):
+            _create_workos_organization_membership(
+                user_id="user_signup_123",
+                organization_id="org_signup_123",
+                role_slug="invalid-role",
+            )
+
+    @patch("authentication.views.authenticate_with_password")
+    def test_pending_signup_can_complete_workos_auth_then_wait_for_approval(self, mock_authenticate):
+        company = Company.objects.create(
+            name="Signup Co",
+            is_active=False,
+            workos_organization_id="org_signup_123",
+        )
+        user = User.objects.create_user(
+            username="new_user",
+            email="new.user@example.com",
+            company=company,
+            workos_user_id="user_signup_123",
+            is_active=False,
+        )
+        SignupRequest.objects.create(
+            full_name="New User",
+            username="new_user",
+            email="new.user@example.com",
+            company_name="Signup Co",
+            company=company,
+            user=user,
+            workos_user_id="user_signup_123",
+            workos_organization_id="org_signup_123",
+        )
+        mock_authenticate.return_value = {
+            "user": {
+                "id": "user_signup_123",
+                "email": "new.user@example.com",
+                "first_name": "New",
+                "last_name": "User",
+            },
+            "organization_id": "org_signup_123",
+        }
+
+        response = self.client.post(
+            reverse("login_password"),
+            {"identifier": "new.user@example.com", "password": "StrongPass123!"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED, response.data)
+        self.assertEqual(response.data["type"], "access_approval_required")
+        self.assertEqual(response.data["company_name"], "Signup Co")
+        lookup = UsernameEmailLookup.objects.get(username="new_user")
+        self.assertEqual(lookup.email, "new.user@example.com")
+
+    @patch("authentication.workos_service.list_workos_memberships")
+    @patch("authentication.views.authenticate_with_password")
+    def test_password_login_resolves_username_lookup_before_workos(self, mock_authenticate, list_memberships):
+        company = Company.objects.create(
+            name="Lookup Co",
+            workos_organization_id="org_lookup_123",
+        )
+        user = User.objects.create_user(
+            username="lookupuser",
+            email="lookup.user@example.com",
+            company=company,
+            workos_user_id="user_lookup_123",
+            is_active=True,
+        )
+        UserMembership.objects.create(user=user, company=company, role=Role.SUPER_ADMIN)
+        UsernameEmailLookup.objects.update_or_create(
+            username="lookupuser",
+            defaults={
+                "email": "lookup.user@example.com",
+            },
+        )
+        mock_authenticate.return_value = {
+            "user": {
+                "id": "user_lookup_123",
+                "email": "lookup.user@example.com",
+                "first_name": "Lookup",
+                "last_name": "User",
+            },
+            "organization_id": "org_lookup_123",
+        }
+        list_memberships.return_value = [{"id": "om_lookup_123", "status": "active", "role_slug": "super-admin"}]
+
+        response = self.client.post(
+            reverse("login_password"),
+            {"identifier": "lookupuser", "password": "StrongPass123!"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        mock_authenticate.assert_called_once()
+        self.assertEqual(mock_authenticate.call_args.args[0], "lookup.user@example.com")
+
+    @patch("authentication.workos_service.list_workos_memberships")
+    @patch("authentication.views.authenticate_with_password")
+    def test_password_login_resolves_local_username_before_workos(self, mock_authenticate, list_memberships):
+        company = Company.objects.create(
+            name="Local Username Co",
+            workos_organization_id="org_local_username_123",
+        )
+        user = User.objects.create_user(
+            username="localuser",
+            email="local.user@example.com",
+            company=company,
+            workos_user_id="user_local_username_123",
+            is_active=True,
+        )
+        UserMembership.objects.create(user=user, company=company, role=Role.SUPER_ADMIN)
+        mock_authenticate.return_value = {
+            "user": {
+                "id": "user_local_username_123",
+                "email": "local.user@example.com",
+                "first_name": "Local",
+                "last_name": "User",
+            },
+            "organization_id": "org_local_username_123",
+        }
+        list_memberships.return_value = [{"id": "om_local_username_123", "status": "active", "role_slug": "super-admin"}]
+
+        response = self.client.post(
+            reverse("login_password"),
+            {"identifier": "localuser", "password": "StrongPass123!"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        mock_authenticate.assert_called_once()
+        self.assertEqual(mock_authenticate.call_args.args[0], "local.user@example.com")
+        lookup = UsernameEmailLookup.objects.get(username="localuser")
+        self.assertEqual(lookup.email, "local.user@example.com")
+
+    @patch("authentication.views.sync_workos_authentication")
+    @patch("authentication.views.authenticate_with_email_verification")
+    def test_email_verification_code_completes_authentication(self, mock_verify_email, mock_sync):
+        company = Company.objects.create(name="Signup Co")
+        user = User.objects.create_user(
+            username="new_user",
+            email="new.user@example.com",
+            company=company,
+            workos_user_id="user_signup_123",
+            is_active=True,
+        )
+        UserMembership.objects.create(user=user, company=company, role=Role.SUPER_ADMIN)
+        auth_response = {
+            "user": {
+                "id": "user_signup_123",
+                "email": "new.user@example.com",
+                "first_name": "New",
+                "last_name": "User",
+            },
+            "organization_id": "org_signup_123",
+        }
+        mock_verify_email.return_value = auth_response
+        mock_sync.return_value = (user, company)
+
+        response = self.client.post(
+            reverse("login_email_verify"),
+            {
+                "pending_authentication_token": "pending_token",
+                "code": "123456",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        mock_verify_email.assert_called_once()
 
 class UserPermissionsTestCase(TestCase):
     def setUp(self):

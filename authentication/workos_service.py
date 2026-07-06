@@ -8,9 +8,15 @@ from django.db import transaction
 from django.db.models import Q
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from authentication.models import AuthAuditLog, SignupRequest
+from authentication.models import (
+    AuthAuditLog,
+    SignupRequest,
+    UsernameEmailLookup,
+    normalize_lookup_email,
+    normalize_lookup_username,
+)
 from core.models import Company, Role, RoleDefinition, UserMembership
-from core.policies import role_requires_office, seed_role_templates
+from core.policies import effective_permissions_for_user, role_requires_office, seed_role_templates
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -100,15 +106,39 @@ def request_user_agent(request):
     return request.META.get("HTTP_USER_AGENT", "")
 
 
+class UsernameLookupNotFound(WorkOSAuthenticationFailed):
+    pass
+
+
 def resolve_identifier_email(identifier):
     identifier = (identifier or "").strip()
     if "@" in identifier:
         return identifier.lower()
 
-    user = User.objects.filter(username__iexact=identifier).only("email").first()
+    username = normalize_lookup_username(identifier)
+    lookup = UsernameEmailLookup.objects.filter(username__iexact=username).only("email").first()
+    if lookup and lookup.email:
+        return lookup.email
+
+    user = User.objects.filter(username__iexact=username).exclude(email="").only("email").first()
     if user and user.email:
-        return user.email.lower()
-    return identifier.lower()
+        email = normalize_lookup_email(user.email)
+        upsert_username_email_lookup(username=username, email=email)
+        return email
+
+    raise UsernameLookupNotFound("User not found.")
+
+
+def upsert_username_email_lookup(*, username, email):
+    username = normalize_lookup_username(username)
+    email = normalize_lookup_email(email)
+    if not username or not email or username == email:
+        return None
+
+    return UsernameEmailLookup.objects.update_or_create(
+        username=username,
+        defaults={"email": email},
+    )
 
 
 def scrub_metadata(value):
@@ -151,11 +181,20 @@ def record_auth_event(
         metadata=safe_metadata,
     )
 
-    if company and company.workos_organization_id and settings.WORKOS_API_KEY and settings.WORKOS_CLIENT_ID:
+    if (
+        settings.WORKOS_AUDIT_LOGS_ENABLED
+        and company
+        and company.workos_organization_id
+        and settings.WORKOS_API_KEY
+        and settings.WORKOS_CLIENT_ID
+    ):
         try:
             emit_workos_audit_event(audit_log)
-        except Exception:
-            logger.warning("WorkOS Audit Log emission failed for auth audit log %s", audit_log.id, exc_info=True)
+        except Exception as exc:
+            if getattr(exc, "code", "") == "invalid_audit_log" or "code=invalid_audit_log" in str(exc):
+                logger.info("Skipping WorkOS Audit Log emission for unconfigured event %s.", audit_log.event_type)
+            else:
+                logger.warning("WorkOS Audit Log emission failed for auth audit log %s", audit_log.id, exc_info=True)
     return audit_log
 
 
@@ -258,9 +297,114 @@ def normalize_pending_payload(payload):
     elif code == "email_verification_required":
         pending_payload["pending_authentication_token"] = payload.get("pending_authentication_token")
         pending_payload["email"] = payload.get("email")
+        pending_payload["email_verification_id"] = payload.get("email_verification_id")
+        pending_payload["detail"] = (
+            "Enter the verification code WorkOS sent to your email address."
+        )
     else:
         pending_payload["detail"] = GENERIC_AUTH_ERROR
     return pending_payload
+
+
+def pending_access_approval_payload(user=None, email="", company=None):
+    signup_request = None
+    if user:
+        signup_request = (
+            SignupRequest.objects.filter(user=user, status=SignupRequest.Status.PENDING)
+            .select_related("company")
+            .first()
+        )
+    if not signup_request and email:
+        signup_request = (
+            SignupRequest.objects.filter(email__iexact=email, status=SignupRequest.Status.PENDING)
+            .select_related("company")
+            .first()
+        )
+
+    company_name = (
+        getattr(company, "name", "")
+        or getattr(getattr(signup_request, "company", None), "name", "")
+        or getattr(signup_request, "company_name", "")
+        or ""
+    )
+    signup_company = company or getattr(signup_request, "company", None)
+    return {
+        "status": "pending",
+        "type": "access_approval_required",
+        "detail": (
+            "Your email is verified. Your organization admin still needs to approve your Metro access and assign permissions."
+        ),
+        "email": email or getattr(user, "email", ""),
+        "company_name": company_name,
+        "signup_request_id": str(signup_request.id) if signup_request else "",
+        "organization_id": signup_company.signup_code if signup_company else "",
+        "workos_organization_id": signup_company.workos_organization_id if signup_company else "",
+        "workos_membership_pending": True,
+    }
+
+
+def signup_email_verification_payload(signup_request):
+    return {
+        "status": "pending",
+        "type": "signup_email_verification_required",
+        "detail": "Enter the verification code WorkOS sent to your email address.",
+        "email": signup_request.email,
+        "company_name": signup_request.company_name,
+        "signup_request_id": str(signup_request.id),
+        "organization_id": signup_request.company.signup_code if signup_request.company else "",
+        "workos_organization_id": signup_request.workos_organization_id,
+        "workos_membership_pending": True,
+    }
+
+
+def raise_access_approval_pending(user=None, email="", company=None):
+    raise WorkOSPendingAuthentication(
+        pending_access_approval_payload(user=user, email=email, company=company)
+    )
+
+
+def has_pending_signup(user=None, email="", workos_user_id=""):
+    queryset = SignupRequest.objects.filter(status=SignupRequest.Status.PENDING)
+    filters = Q()
+    if user:
+        filters |= Q(user=user)
+    if email:
+        filters |= Q(email__iexact=email)
+    if workos_user_id:
+        filters |= Q(workos_user_id=workos_user_id)
+    return bool(filters and queryset.filter(filters).exists())
+
+
+def record_verified_username_lookup(workos_user):
+    workos_user_id = _workos_user_id(workos_user)
+    email = _workos_user_email(workos_user)
+    if not email:
+        return None
+
+    signup_request = None
+    signup_filters = Q(email__iexact=email)
+    if workos_user_id:
+        signup_filters |= Q(workos_user_id=workos_user_id)
+    signup_request = (
+        SignupRequest.objects.filter(
+            signup_filters,
+            status__in=[SignupRequest.Status.PENDING, SignupRequest.Status.APPROVED],
+        )
+        .exclude(username="")
+        .order_by("-created_at")
+        .first()
+    )
+    if signup_request:
+        return upsert_username_email_lookup(username=signup_request.username, email=email)
+
+    user = None
+    if workos_user_id:
+        user = User.objects.filter(workos_user_id=workos_user_id).first()
+    if not user:
+        user = User.objects.filter(email__iexact=email).first()
+    if user and user.username:
+        return upsert_username_email_lookup(username=user.username, email=email)
+    return None
 
 
 def handle_workos_exception(exc):
@@ -311,6 +455,35 @@ def authenticate_with_magic_auth(email, code, request):
         handle_workos_exception(exc)
 
 
+def authenticate_with_email_verification(pending_authentication_token, code, request):
+    client = get_workos_client()
+    try:
+        return client.user_management.authenticate_with_email_verification(
+            pending_authentication_token=pending_authentication_token,
+            code=code,
+            ip_address=request_ip(request),
+            user_agent=request_user_agent(request),
+        )
+    except Exception as exc:
+        handle_workos_exception(exc)
+
+
+def send_signup_verification_email(workos_user_id):
+    client = get_workos_client()
+    try:
+        return client.user_management.send_verification_email(workos_user_id)
+    except Exception as exc:
+        handle_workos_exception(exc)
+
+
+def verify_signup_verification_email(workos_user_id, code):
+    client = get_workos_client()
+    try:
+        return client.user_management.verify_email(workos_user_id, code=code)
+    except Exception as exc:
+        handle_workos_exception(exc)
+
+
 def challenge_mfa_factor(authentication_factor_id):
     client = get_workos_client()
     try:
@@ -356,7 +529,7 @@ def list_workos_memberships(workos_user_id, workos_organization_id=None):
     kwargs = {"user_id": workos_user_id, "limit": 100}
     if workos_organization_id:
         kwargs["organization_id"] = workos_organization_id
-    page = client.user_management.list_organization_memberships(**kwargs)
+    page = client.organization_membership.list_organization_memberships(**kwargs)
     return list(getattr(page, "data", []) or as_plain_data(page).get("data", []))
 
 
@@ -394,6 +567,10 @@ def _first_page_item(page):
 
 def _workos_role_slug_for_metro_role(role):
     seed_role_templates()
+    role_value = getattr(role, "value", role)
+    configured_slug = (getattr(settings, "WORKOS_ROLE_SLUGS", {}).get(role_value) or "").strip()
+    if configured_slug:
+        return configured_slug
     definition = RoleDefinition.objects.filter(code=role, is_active=True).first()
     if definition and definition.workos_role_slug:
         return definition.workos_role_slug
@@ -401,6 +578,27 @@ def _workos_role_slug_for_metro_role(role):
         if mapped_role == role:
             return slug
     return str(role).lower().replace("_", "-")
+
+
+def _is_workos_invalid_role_error(exc):
+    return getattr(exc, "code", "") == "invalid_role" or "code=invalid_role" in str(exc)
+
+
+def _create_workos_organization_membership(*, user_id, organization_id, role_slug):
+    try:
+        return get_workos_client().organization_membership.create_organization_membership(
+            user_id=user_id,
+            organization_id=organization_id,
+            role=_workos_single_role(role_slug),
+        )
+    except Exception as exc:
+        if _is_workos_invalid_role_error(exc):
+            raise WorkOSConfigurationError(
+                "WorkOS rejected role slug "
+                f"'{role_slug}'. Set the matching WORKOS_*_ROLE_SLUG environment variable "
+                "to a role slug that exists in WorkOS, or create that role in WorkOS."
+            ) from exc
+        raise
 
 
 def _find_or_create_workos_organization(company):
@@ -431,15 +629,21 @@ def _find_or_create_workos_user(signup_request, password):
     existing = _first_page_item(client.user_management.list_users(email=email, limit=1))
     if existing:
         first_name, last_name = _split_full_name(signup_request.full_name)
-        return client.user_management.update_user(
-            as_plain_data(existing)["id"],
-            first_name=first_name,
-            last_name=last_name,
-            name=signup_request.full_name,
-            metadata={
+        update_payload = {
+            "first_name": first_name,
+            "last_name": last_name,
+            "name": signup_request.full_name,
+            "metadata": {
                 "metro_signup_request_id": str(signup_request.id),
                 "metro_company_name": signup_request.company_name,
+                "metro_username": signup_request.username or "",
             },
+        }
+        if password:
+            update_payload["password"] = _workos_password(password)
+        return client.user_management.update_user(
+            as_plain_data(existing)["id"],
+            **update_payload,
         )
 
     first_name, last_name = _split_full_name(signup_request.full_name)
@@ -452,6 +656,7 @@ def _find_or_create_workos_user(signup_request, password):
         "metadata": {
             "metro_signup_request_id": str(signup_request.id),
             "metro_company_name": signup_request.company_name,
+            "metro_username": signup_request.username or "",
         },
     }
     if password:
@@ -501,7 +706,7 @@ def _ensure_local_signup_user(signup_request, workos_user):
         user = User.objects.filter(email__iexact=email).first()
     if not user:
         user = User(
-            username=_unique_username_from_email(email),
+            username=normalize_lookup_username(signup_request.username),
             email=email,
         )
     user.first_name = first_name
@@ -570,10 +775,10 @@ def bootstrap_owner_account(*, company_name, owner_email, owner_password, owner_
     role_slug = _workos_role_slug_for_metro_role(Role.SUPER_ADMIN)
     workos_membership = _active_membership_for_org(workos_user_id, organization_id) if workos_user_id else None
     if not workos_membership:
-        workos_membership = get_workos_client().organization_membership.create_organization_membership(
+        workos_membership = _create_workos_organization_membership(
             user_id=workos_user_id,
             organization_id=organization_id,
-            role=_workos_single_role(role_slug),
+            role_slug=role_slug,
         )
     membership_id = as_plain_data(workos_membership).get("id", "")
     membership, membership_created = UserMembership.unscoped_objects.update_or_create(
@@ -601,8 +806,34 @@ def bootstrap_owner_account(*, company_name, owner_email, owner_password, owner_
     }
 
 
+def _signup_owner_recipients(company):
+    if not company:
+        return []
+
+    emails = list(
+        User.objects.filter(company=company, is_active=True, is_owner=True)
+        .exclude(email="")
+        .values_list("email", flat=True)
+    )
+    emails.extend(
+        UserMembership.unscoped_objects.filter(
+            company=company,
+            role=Role.SUPER_ADMIN,
+            is_active=True,
+            user__is_active=True,
+        )
+        .exclude(user__email="")
+        .values_list("user__email", flat=True)
+    )
+    return list(dict.fromkeys(email.strip().lower() for email in emails if email))
+
+
 def notify_owner_of_signup(signup_request, request=None):
-    owner_email = settings.METRO_OWNER_EMAIL
+    recipients = _signup_owner_recipients(signup_request.company)
+    if not recipients:
+        logger.warning("Signup %s has no active owner recipients.", signup_request.id)
+        return
+
     review_url = settings.METRO_SIGNUP_REVIEW_URL
     body = "\n".join(
         [
@@ -621,7 +852,7 @@ def notify_owner_of_signup(signup_request, request=None):
         subject=f"Metro signup approval needed - {signup_request.company_name}",
         message=body,
         from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[owner_email],
+        recipient_list=recipients,
         fail_silently=True,
     )
 
@@ -638,16 +869,38 @@ def create_pending_signup(signup_request, password):
     signup_request.workos_user_id = as_plain_data(workos_user).get("id") or as_plain_data(workos_user).get("user_id") or ""
     signup_request.workos_organization_id = as_plain_data(organization).get("id") or ""
     signup_request.user = _ensure_local_signup_user(signup_request, workos_user)
+    signup_request.status = SignupRequest.Status.EMAIL_VERIFICATION_PENDING
+    send_signup_verification_email(signup_request.workos_user_id)
     signup_request.save(
         update_fields=[
             "company",
             "company_name",
             "user",
+            "status",
             "workos_user_id",
             "workos_organization_id",
             "updated_at",
         ]
     )
+    return signup_request
+
+
+@transaction.atomic
+def verify_pending_signup_email(signup_request, code):
+    if signup_request.status == SignupRequest.Status.PENDING:
+        return signup_request
+    if signup_request.status != SignupRequest.Status.EMAIL_VERIFICATION_PENDING:
+        raise MetroAccessDenied("Signup request is not waiting for email verification.")
+    if not signup_request.workos_user_id:
+        raise MetroAccessDenied("Signup request is missing a WorkOS user.")
+
+    verify_signup_verification_email(signup_request.workos_user_id, code)
+    workos_user = get_workos_client().user_management.get_user(signup_request.workos_user_id)
+    signup_request.user = _ensure_local_signup_user(signup_request, workos_user)
+    signup_request.status = SignupRequest.Status.PENDING
+    signup_request.save(update_fields=["user", "status", "updated_at"])
+    if signup_request.username:
+        upsert_username_email_lookup(username=signup_request.username, email=signup_request.email)
     return signup_request
 
 
@@ -671,10 +924,10 @@ def approve_pending_signup(signup_request, approver, *, role, office=None):
         signup_request.workos_user_id = as_plain_data(workos_user).get("id") or as_plain_data(workos_user).get("user_id") or ""
 
     role_slug = _workos_role_slug_for_metro_role(role)
-    membership = get_workos_client().organization_membership.create_organization_membership(
+    membership = _create_workos_organization_membership(
         user_id=signup_request.workos_user_id,
         organization_id=organization_id,
-        role=_workos_single_role(role_slug),
+        role_slug=role_slug,
     )
     membership_id = as_plain_data(membership).get("id", "")
 
@@ -791,6 +1044,8 @@ def _resolve_or_provision_user(workos_user, company):
         user = User.objects.filter(email__iexact=email).first()
 
     if not user:
+        if has_pending_signup(email=email, workos_user_id=workos_user_id):
+            raise_access_approval_pending(email=email, company=company)
         if not settings.WORKOS_AUTO_PROVISION_USERS or not company:
             raise MetroAccessDenied("WorkOS user is not provisioned in Metro.")
         user = User(
@@ -804,6 +1059,8 @@ def _resolve_or_provision_user(workos_user, company):
         user.save()
 
     if not user.is_active:
+        if has_pending_signup(user=user, email=email, workos_user_id=workos_user_id):
+            raise_access_approval_pending(user=user, email=email, company=company)
         raise MetroAccessDenied("User is inactive.")
 
     _sync_profile(user, workos_user)
@@ -833,7 +1090,7 @@ def _sync_membership_from_workos(user, company, workos_membership):
     if role_requires_office(metro_role):
         office_memberships = [membership for membership in existing if membership.office_id]
         if not office_memberships:
-            raise MetroAccessDenied("Metro branch access is required.")
+            raise_access_approval_pending(user=user, email=user.email, company=company)
         for membership in office_memberships:
             membership.role = metro_role
             membership.workos_role_slug = role_slug
@@ -863,10 +1120,15 @@ def _ensure_local_access(user, company):
     else:
         memberships = UserMembership.unscoped_objects.filter(user=user, company=company, is_active=True)
     if not memberships.exists():
+        if has_pending_signup(user=user, email=user.email, workos_user_id=user.workos_user_id):
+            raise_access_approval_pending(user=user, email=user.email, company=company)
         raise MetroAccessDenied("Metro access is not configured.")
     for membership in memberships:
         if role_requires_office(membership.role) and not membership.office_id:
-            raise MetroAccessDenied("Metro branch access is required.")
+            raise_access_approval_pending(user=user, email=user.email, company=company or membership.company)
+
+    if company and not effective_permissions_for_user(user, company=company):
+        raise_access_approval_pending(user=user, email=user.email, company=company)
 
 
 @transaction.atomic
@@ -877,12 +1139,18 @@ def sync_workos_authentication(auth_response):
     workos_organization_id = auth_data.get("organization_id") or auth_data.get("organizationId")
     if not workos_user_id:
         raise MetroAccessDenied("WorkOS user was missing from authentication response.")
+    record_verified_username_lookup(workos_user)
 
     company = _company_from_workos_organization(workos_organization_id)
     existing_user = User.objects.filter(workos_user_id=workos_user_id).first()
     if not company and existing_user:
         company = _single_local_company(existing_user)
     if workos_organization_id and not company:
+        if has_pending_signup(user=existing_user, email=_workos_user_email(workos_user), workos_user_id=workos_user_id):
+            raise_access_approval_pending(
+                user=existing_user,
+                email=_workos_user_email(workos_user),
+            )
         raise MetroAccessDenied("WorkOS organization is not linked to a Metro company.")
 
     user = _resolve_or_provision_user(workos_user, company)

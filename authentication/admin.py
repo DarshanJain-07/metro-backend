@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from authentication.models import AuthAuditLog, SignupRequest
+from authentication.models import AuthAuditLog, SignupRequest, UsernameEmailLookup
 
 
 @admin.register(SignupRequest)
@@ -41,3 +41,9 @@ class AuthAuditLogAdmin(admin.ModelAdmin):
         "metadata",
         "created_at",
     )
+
+
+@admin.register(UsernameEmailLookup)
+class UsernameEmailLookupAdmin(admin.ModelAdmin):
+    list_display = ("username", "email")
+    search_fields = ("username", "email")

@@ -156,8 +156,21 @@ SIMPLE_JWT = {
 WORKOS_API_KEY = require_env('WORKOS_API_KEY')
 WORKOS_CLIENT_ID = require_env('WORKOS_CLIENT_ID')
 WORKOS_AUTO_PROVISION_USERS = False
-METRO_OWNER_EMAIL = 'metroexpress456@gmail.com'
-DEFAULT_FROM_EMAIL = METRO_OWNER_EMAIL
+WORKOS_AUDIT_LOGS_ENABLED = os.environ.get('WORKOS_AUDIT_LOGS_ENABLED', 'false').lower() in ('1', 'true', 'yes', 'on')
+WORKOS_ROLE_SLUGS = {
+    'SUPER_ADMIN': os.environ.get('WORKOS_SUPER_ADMIN_ROLE_SLUG', 'admin'),
+    'BRANCH_ADMIN': os.environ.get('WORKOS_BRANCH_ADMIN_ROLE_SLUG', ''),
+    'BOOKING_USER': os.environ.get('WORKOS_BOOKING_USER_ROLE_SLUG', ''),
+    'DELIVERY_USER': os.environ.get('WORKOS_DELIVERY_USER_ROLE_SLUG', ''),
+    'ACCOUNTANT': os.environ.get('WORKOS_ACCOUNTANT_ROLE_SLUG', ''),
+    'VIEWER': os.environ.get('WORKOS_VIEWER_ROLE_SLUG', ''),
+    'METRO': os.environ.get('WORKOS_METRO_ROLE_SLUG', ''),
+}
+DEFAULT_FROM_EMAIL = (
+    os.environ.get('DEFAULT_FROM_EMAIL')
+    or os.environ.get('BOOTSTRAP_OWNER_EMAIL')
+    or 'webmaster@localhost'
+)
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 METRO_SIGNUP_REVIEW_URL = join_url(FRONTEND_URL, '/admin/users')
 WORKOS_ROLE_MAPPING = {

@@ -1,16 +1,21 @@
 import re
 
-from django.contrib.auth import get_user_model
 import django.contrib.auth.password_validation as validators
+from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db.models import Q
 from rest_framework import serializers
 
-from authentication.models import SignupRequest
+from authentication.models import (
+    SignupRequest,
+    UsernameEmailLookup,
+    normalize_lookup_email,
+    normalize_lookup_username,
+)
 from core.models import (
     Company,
-    CompanyRolePermissionOverride,
     CompanyOffice,
+    CompanyRolePermissionOverride,
     OfficeStatus,
     PermissionCatalog,
     PermissionScope,
@@ -47,7 +52,9 @@ class PasswordLoginSerializer(serializers.Serializer):
     def validate(self, data):
         identifier = data.get("identifier") or data.get("username") or data.get("email")
         if not identifier:
-            raise serializers.ValidationError({"identifier": "Email or username is required."})
+            raise serializers.ValidationError(
+                {"identifier": "Email or username is required."}
+            )
         data["identifier"] = identifier
         return data
 
@@ -59,12 +66,23 @@ class OtpStartSerializer(serializers.Serializer):
     def validate(self, data):
         identifier = data.get("identifier") or data.get("email")
         if not identifier:
-            raise serializers.ValidationError({"identifier": "Email or username is required."})
+            raise serializers.ValidationError(
+                {"identifier": "Email or username is required."}
+            )
         data["identifier"] = identifier
         return data
 
 
 class OtpVerifySerializer(OtpStartSerializer):
+    code = serializers.CharField(min_length=4, max_length=12, trim_whitespace=True)
+
+
+class EmailVerificationSerializer(serializers.Serializer):
+    pending_authentication_token = serializers.CharField()
+    code = serializers.CharField(min_length=4, max_length=12, trim_whitespace=True)
+
+
+class SignupEmailVerificationSerializer(serializers.Serializer):
     code = serializers.CharField(min_length=4, max_length=12, trim_whitespace=True)
 
 
@@ -89,22 +107,63 @@ class LogoutSerializer(serializers.Serializer):
 
 class SignupRequestCreateSerializer(serializers.ModelSerializer):
     organization_id = serializers.CharField(write_only=True, trim_whitespace=True)
-    phone = serializers.CharField(required=True, allow_blank=False, trim_whitespace=True)
-    password = serializers.CharField(write_only=True, min_length=10, trim_whitespace=False)
+    phone = serializers.CharField(
+        required=True, allow_blank=False, trim_whitespace=True
+    )
+    password = serializers.CharField(
+        write_only=True, min_length=10, trim_whitespace=False
+    )
 
     class Meta:
         model = SignupRequest
-        fields = ("id", "full_name", "email", "phone", "organization_id", "password", "status")
+        fields = (
+            "id",
+            "full_name",
+            "username",
+            "email",
+            "phone",
+            "organization_id",
+            "password",
+            "status",
+        )
         read_only_fields = ("id", "status")
+
+    def validate_username(self, value):
+        username = normalize_lookup_username(value)
+        if not username:
+            raise serializers.ValidationError("Username is required.")
+        if "@" in username:
+            raise serializers.ValidationError("Username must not be an email address.")
+        if User.objects.filter(username__iexact=username).exists():
+            raise serializers.ValidationError("This username is already taken.")
+        if UsernameEmailLookup.objects.filter(username__iexact=username).exists():
+            raise serializers.ValidationError("This username is already taken.")
+        if (
+            SignupRequest.objects.filter(username__iexact=username)
+            .exclude(status=SignupRequest.Status.REJECTED)
+            .exists()
+        ):
+            raise serializers.ValidationError("This username is already taken.")
+        return username
 
     def validate_email(self, value):
         email = value.strip().lower()
         if User.objects.filter(email__iexact=email, is_active=True).exists():
-            raise serializers.ValidationError("An account with this email already exists.")
-        if SignupRequest.objects.filter(email__iexact=email, status=SignupRequest.Status.PENDING).exists():
-            raise serializers.ValidationError("A signup for this email is already pending approval.")
-        if SignupRequest.objects.filter(email__iexact=email, status=SignupRequest.Status.APPROVED).exists():
-            raise serializers.ValidationError("An account with this email has already been approved.")
+            raise serializers.ValidationError(
+                "An account with this email already exists."
+            )
+        if SignupRequest.objects.filter(
+            email__iexact=email, status=SignupRequest.Status.PENDING
+        ).exists():
+            raise serializers.ValidationError(
+                "A signup for this email is already pending approval."
+            )
+        if SignupRequest.objects.filter(
+            email__iexact=email, status=SignupRequest.Status.APPROVED
+        ).exists():
+            raise serializers.ValidationError(
+                "An account with this email has already been approved."
+            )
         return email
 
     def validate_password(self, value):
@@ -126,7 +185,9 @@ class SignupRequestCreateSerializer(serializers.ModelSerializer):
 
     def validate_organization_id(self, value):
         organization_id = value.strip().upper()
-        company = Company.objects.filter(signup_code=organization_id, is_active=True).first()
+        company = Company.objects.filter(
+            signup_code=organization_id, is_active=True
+        ).first()
         if not company:
             raise serializers.ValidationError("Enter a valid organization ID.")
         return organization_id
@@ -158,6 +219,7 @@ class SignupRequestSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "full_name",
+            "username",
             "email",
             "phone",
             "company_name",
@@ -195,11 +257,17 @@ class SignupApprovalSerializer(serializers.Serializer):
         if not role_definition(role):
             raise serializers.ValidationError({"role": "Invalid role."})
         if role_requires_office(role) and not office:
-            raise serializers.ValidationError({"branch": "Branch is required for this role."})
+            raise serializers.ValidationError(
+                {"branch": "Branch is required for this role."}
+            )
         if not role_requires_office(role) and office:
-            raise serializers.ValidationError({"branch": "Company-level roles must not include a branch."})
+            raise serializers.ValidationError(
+                {"branch": "Company-level roles must not include a branch."}
+            )
         if office and company and not is_assignable_user_office(office, company):
-            raise serializers.ValidationError({"branch": "Branch cannot be assigned to users for this company."})
+            raise serializers.ValidationError(
+                {"branch": "Branch cannot be assigned to users for this company."}
+            )
         return data
 
 
@@ -208,15 +276,19 @@ class SignupRejectSerializer(serializers.Serializer):
 
 
 def assignable_user_offices(company):
-    return CompanyOffice.unscoped_objects.filter(
-        company=company,
-        is_active=True,
-        status=OfficeStatus.ACTIVE,
-    ).filter(
-        Q(global_office__isnull=True)
-        | Q(global_office__owner_company__isnull=True)
-        | Q(global_office__owner_company=company)
-    ).order_by("global_office__owner_company__name", "name")
+    return (
+        CompanyOffice.unscoped_objects.filter(
+            company=company,
+            is_active=True,
+            status=OfficeStatus.ACTIVE,
+        )
+        .filter(
+            Q(global_office__isnull=True)
+            | Q(global_office__owner_company__isnull=True)
+            | Q(global_office__owner_company=company)
+        )
+        .order_by("global_office__owner_company__name", "name")
+    )
 
 
 def is_assignable_user_office(office, company):
@@ -242,7 +314,11 @@ def validate_and_set_password(user, password):
 def can_manage_metro_role(request_user, company):
     return bool(
         request_user
-        and (request_user.is_superuser or request_user.is_owner or is_metro_user(request_user, company=company))
+        and (
+            request_user.is_superuser
+            or request_user.is_owner
+            or is_metro_user(request_user, company=company)
+        )
     )
 
 
@@ -282,7 +358,11 @@ class UserMembershipSerializer(serializers.ModelSerializer):
             "permissions",
             "scoped_permissions",
         )
-        read_only_fields = ("company", "workos_organization_membership_id", "workos_role_slug")
+        read_only_fields = (
+            "company",
+            "workos_organization_membership_id",
+            "workos_role_slug",
+        )
         extra_kwargs = {"user": {"required": False}}
 
     def get_permissions(self, obj):
@@ -307,24 +387,37 @@ class UserMembershipSerializer(serializers.ModelSerializer):
     def validate(self, data):
         company = get_current_company()
         if not company:
-            raise serializers.ValidationError({"company": "Active company context required."})
-        request_user = self.context.get("request").user if self.context.get("request") else None
+            raise serializers.ValidationError(
+                {"company": "Active company context required."}
+            )
+        request_user = (
+            self.context.get("request").user if self.context.get("request") else None
+        )
         office = data.get("office", getattr(self.instance, "office", None))
         role = data.get("role", getattr(self.instance, "role", None))
         current_role = getattr(self.instance, "role", None)
         if (
-            (role == Role.METRO or current_role == Role.METRO)
-            and not can_manage_metro_role(request_user, company)
-        ):
-            raise serializers.ValidationError({"role": "Metro role assignments can only be changed by owners or Metro users."})
+            role == Role.METRO or current_role == Role.METRO
+        ) and not can_manage_metro_role(request_user, company):
+            raise serializers.ValidationError(
+                {
+                    "role": "Metro role assignments can only be changed by owners or Metro users."
+                }
+            )
         if role and not role_definition(role):
             raise serializers.ValidationError({"role": "Invalid role."})
         if role and role_requires_office(role) and not office:
-            raise serializers.ValidationError({"office": "Office is required for this role."})
+            raise serializers.ValidationError(
+                {"office": "Office is required for this role."}
+            )
         if role and not role_requires_office(role) and office:
-            raise serializers.ValidationError({"office": "Company-level roles must not include an office."})
+            raise serializers.ValidationError(
+                {"office": "Company-level roles must not include an office."}
+            )
         if office and not is_assignable_user_office(office, company):
-            raise serializers.ValidationError({"office": "Office cannot be assigned to users for the active company."})
+            raise serializers.ValidationError(
+                {"office": "Office cannot be assigned to users for the active company."}
+            )
         return data
 
 
@@ -340,7 +433,9 @@ class UserSerializer(serializers.ModelSerializer):
     office_name = serializers.ReadOnlyField(source="office.name", default=None)
     memberships = UserMembershipSerializer(many=True, read_only=True)
     password = serializers.CharField(write_only=True, required=False, allow_blank=False)
-    membership_inputs = UserMembershipSerializer(many=True, write_only=True, required=False)
+    membership_inputs = UserMembershipSerializer(
+        many=True, write_only=True, required=False
+    )
     role = serializers.CharField(required=False, allow_blank=True)
     permissions = serializers.SerializerMethodField()
     scoped_permissions = serializers.SerializerMethodField()
@@ -390,6 +485,33 @@ class UserSerializer(serializers.ModelSerializer):
             for code, scope in sorted(effective_permissions_for_user(obj).items())
         ]
 
+    def validate_username(self, value):
+        username = normalize_lookup_username(value)
+        if not username:
+            raise serializers.ValidationError("Username is required.")
+        if "@" in username:
+            raise serializers.ValidationError("Username must not be an email address.")
+        user_qs = User.objects.filter(username__iexact=username)
+        lookup_qs = UsernameEmailLookup.objects.filter(username__iexact=username)
+        signup_qs = SignupRequest.objects.filter(username__iexact=username).exclude(
+            status=SignupRequest.Status.REJECTED
+        )
+        if self.instance:
+            user_qs = user_qs.exclude(pk=self.instance.pk)
+            existing_lookup = lookup_qs.first()
+            if existing_lookup and existing_lookup.email != normalize_lookup_email(
+                self.instance.email
+            ):
+                raise serializers.ValidationError("This username is already taken.")
+            signup_qs = signup_qs.exclude(user=self.instance)
+        elif lookup_qs.exists():
+            raise serializers.ValidationError("This username is already taken.")
+        if user_qs.exists():
+            raise serializers.ValidationError("This username is already taken.")
+        if signup_qs.exists():
+            raise serializers.ValidationError("This username is already taken.")
+        return username
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
         company = get_current_company()
@@ -413,48 +535,95 @@ class UserSerializer(serializers.ModelSerializer):
     def validate(self, data):
         company = get_current_company()
         if not company:
-            raise serializers.ValidationError({"company": "Active company context required."})
-        request_user = self.context.get("request").user if self.context.get("request") else None
+            raise serializers.ValidationError(
+                {"company": "Active company context required."}
+            )
+        request_user = (
+            self.context.get("request").user if self.context.get("request") else None
+        )
         memberships = data.get("membership_inputs") or []
         office = data.get("office", getattr(self.instance, "office", None))
         role = data.get("role")
         current_membership = None
         current_role = None
         if not role and self.instance:
-            current_membership = self.instance.memberships.filter(company=company, is_active=True).first()
+            current_membership = self.instance.memberships.filter(
+                company=company, is_active=True
+            ).first()
             role = current_membership.role if current_membership else None
-            office = office or (current_membership.office if current_membership else None)
+            office = office or (
+                current_membership.office if current_membership else None
+            )
         if self.instance and current_membership is None:
-            current_membership = self.instance.memberships.filter(company=company, is_active=True).first()
+            current_membership = self.instance.memberships.filter(
+                company=company, is_active=True
+            ).first()
         current_role = current_membership.role if current_membership else None
         if (
-            (role == Role.METRO or current_role == Role.METRO or includes_metro_membership(memberships))
-            and not can_manage_metro_role(request_user, company)
-        ):
-            raise serializers.ValidationError({"role": "Metro users can only be changed by owners or Metro users."})
+            role == Role.METRO
+            or current_role == Role.METRO
+            or includes_metro_membership(memberships)
+        ) and not can_manage_metro_role(request_user, company):
+            raise serializers.ValidationError(
+                {"role": "Metro users can only be changed by owners or Metro users."}
+            )
         if not self.instance and not memberships and not role:
-            raise serializers.ValidationError({"membership_inputs": "At least one membership is required."})
+            raise serializers.ValidationError(
+                {"membership_inputs": "At least one membership is required."}
+            )
         if role == "":
             raise serializers.ValidationError({"role": "Role is required."})
         if role and not role_definition(role):
             raise serializers.ValidationError({"role": "Invalid role."})
         if role and role_requires_office(role) and not office:
-            raise serializers.ValidationError({"branch": "Default branch is required for this role."})
+            raise serializers.ValidationError(
+                {"branch": "Default branch is required for this role."}
+            )
         if role and not role_requires_office(role) and office:
-            raise serializers.ValidationError({"branch": "Company-level roles must not have a default branch."})
+            raise serializers.ValidationError(
+                {"branch": "Company-level roles must not have a default branch."}
+            )
         if office and not is_assignable_user_office(office, company):
-            raise serializers.ValidationError({"branch": "This branch cannot be assigned to users for the active company."})
+            raise serializers.ValidationError(
+                {
+                    "branch": "This branch cannot be assigned to users for the active company."
+                }
+            )
         for membership in memberships:
             membership_office = membership.get("office")
             membership_role = membership.get("role")
             if membership_role and not role_definition(membership_role):
-                raise serializers.ValidationError({"membership_inputs": "Invalid membership role."})
-            if membership_role and role_requires_office(membership_role) and not membership_office:
-                raise serializers.ValidationError({"membership_inputs": "Membership office is required for this role."})
-            if membership_role and not role_requires_office(membership_role) and membership_office:
-                raise serializers.ValidationError({"membership_inputs": "Company-level roles must not include an office."})
-            if membership_office and not is_assignable_user_office(membership_office, company):
-                raise serializers.ValidationError({"membership_inputs": "Membership office cannot be assigned to users."})
+                raise serializers.ValidationError(
+                    {"membership_inputs": "Invalid membership role."}
+                )
+            if (
+                membership_role
+                and role_requires_office(membership_role)
+                and not membership_office
+            ):
+                raise serializers.ValidationError(
+                    {
+                        "membership_inputs": "Membership office is required for this role."
+                    }
+                )
+            if (
+                membership_role
+                and not role_requires_office(membership_role)
+                and membership_office
+            ):
+                raise serializers.ValidationError(
+                    {
+                        "membership_inputs": "Company-level roles must not include an office."
+                    }
+                )
+            if membership_office and not is_assignable_user_office(
+                membership_office, company
+            ):
+                raise serializers.ValidationError(
+                    {
+                        "membership_inputs": "Membership office cannot be assigned to users."
+                    }
+                )
         return data
 
     def create(self, validated_data):
@@ -467,7 +636,14 @@ class UserSerializer(serializers.ModelSerializer):
             memberships = [{"office": office, "role": role}]
         user = User(**validated_data)
         user.company = company
-        user.office = office or next((membership.get("office") for membership in memberships if membership.get("office")), None)
+        user.office = office or next(
+            (
+                membership.get("office")
+                for membership in memberships
+                if membership.get("office")
+            ),
+            None,
+        )
         if password:
             # WorkOS owns usable credentials. Metro accepts the field for old
             # clients but never stores a Django password for app sign-in.
@@ -509,10 +685,18 @@ class UserSerializer(serializers.ModelSerializer):
                     defaults={"is_active": True},
                 )
         elif role is not None or office_provided:
-            current_membership = instance.memberships.filter(company=company, is_active=True).first()
-            next_role = role or (current_membership.role if current_membership else Role.VIEWER)
+            current_membership = instance.memberships.filter(
+                company=company, is_active=True
+            ).first()
+            next_role = role or (
+                current_membership.role if current_membership else Role.VIEWER
+            )
             next_office = office if role_requires_office(next_role) else None
-            if role_requires_office(next_role) and next_office is None and current_membership:
+            if (
+                role_requires_office(next_role)
+                and next_office is None
+                and current_membership
+            ):
                 next_office = current_membership.office
             if current_membership:
                 current_membership.role = next_role
@@ -541,7 +725,9 @@ class ChangePasswordSerializer(serializers.Serializer):
 
     def validate(self, data):
         if data["old_password"] == data["new_password"]:
-            raise serializers.ValidationError({"new_password": "New password cannot be the same as the old password."})
+            raise serializers.ValidationError(
+                {"new_password": "New password cannot be the same as the old password."}
+            )
         return data
 
 
@@ -561,7 +747,16 @@ class RoleTemplateSummarySerializer(serializers.Serializer):
 class RoleDefinitionSerializer(serializers.ModelSerializer):
     class Meta:
         model = RoleDefinition
-        fields = ("id", "code", "workos_role_slug", "name", "description", "requires_office", "is_active", "sort_order")
+        fields = (
+            "id",
+            "code",
+            "workos_role_slug",
+            "name",
+            "description",
+            "requires_office",
+            "is_active",
+            "sort_order",
+        )
 
 
 class CompanyRolePermissionOverrideSerializer(serializers.ModelSerializer):
@@ -599,15 +794,21 @@ class CompanyRolePermissionOverrideSerializer(serializers.ModelSerializer):
         if not role_definition(value):
             raise serializers.ValidationError("Invalid role.")
         if value == Role.METRO:
-            raise serializers.ValidationError("Metro permissions are built in and cannot be changed.")
+            raise serializers.ValidationError(
+                "Metro permissions are built in and cannot be changed."
+            )
         return value
 
     def create(self, validated_data):
         company = get_current_company()
         if not company:
-            raise serializers.ValidationError({"company": "Active company context required."})
+            raise serializers.ValidationError(
+                {"company": "Active company context required."}
+            )
         validated_data["company"] = company
-        validated_data.setdefault("based_on_template_revision", role_template_revision(validated_data["role"]))
+        validated_data.setdefault(
+            "based_on_template_revision", role_template_revision(validated_data["role"])
+        )
         obj, _ = CompanyRolePermissionOverride.objects.update_or_create(
             company=company,
             role=validated_data["role"],
@@ -615,7 +816,9 @@ class CompanyRolePermissionOverrideSerializer(serializers.ModelSerializer):
             defaults={
                 "enabled": validated_data.get("enabled", True),
                 "scope": validated_data.get("scope", PermissionScope.BRANCH),
-                "based_on_template_revision": validated_data["based_on_template_revision"],
+                "based_on_template_revision": validated_data[
+                    "based_on_template_revision"
+                ],
             },
         )
         return obj
@@ -630,7 +833,6 @@ def role_template_payload(role):
         "requires_office": definition.requires_office if definition else True,
         "revision": role_template_revision(role),
         "default_permissions": [
-            {"code": code, "scope": scope}
-            for code, scope in sorted(grants.items())
+            {"code": code, "scope": scope} for code, scope in sorted(grants.items())
         ],
     }

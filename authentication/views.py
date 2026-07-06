@@ -12,6 +12,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .serializers import (
     ChangePasswordSerializer,
     CompanyRolePermissionOverrideSerializer,
+    EmailVerificationSerializer,
     LogoutSerializer,
     MfaChallengeSerializer,
     MfaVerifySerializer,
@@ -22,6 +23,7 @@ from .serializers import (
     PermissionCatalogSerializer,
     RoleDefinitionSerializer,
     SignupApprovalSerializer,
+    SignupEmailVerificationSerializer,
     SignupRejectSerializer,
     SignupRequestCreateSerializer,
     SignupRequestSerializer,
@@ -37,6 +39,7 @@ from .workos_service import (
     WorkOSAuthenticationFailed,
     WorkOSConfigurationError,
     WorkOSPendingAuthentication,
+    UsernameLookupNotFound,
     as_plain_data,
     authenticate_with_magic_auth,
     authenticate_with_organization_selection,
@@ -55,6 +58,9 @@ from .workos_service import (
     approve_pending_signup,
     create_pending_signup,
     notify_owner_of_signup,
+    pending_access_approval_payload,
+    signup_email_verification_payload,
+    verify_pending_signup_email,
 )
 from authentication.models import SignupRequest
 from core.models import CompanyRolePermissionOverride, PermissionCatalog, RoleDefinition, UserMembership
@@ -134,6 +140,8 @@ def _complete_workos_auth(request, auth_response, event_type):
     workos_user_id, workos_organization_id = _auth_response_identity(auth_response)
     try:
         user, company = sync_workos_authentication(auth_response)
+    except WorkOSPendingAuthentication as exc:
+        return _pending_response(request, event_type, exc)
     except (MetroAccessDenied, WorkOSAuthenticationFailed):
         record_auth_event(
             event_type,
@@ -185,9 +193,12 @@ class PasswordLoginView(generics.GenericAPIView):
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        email = resolve_identifier_email(serializer.validated_data["identifier"])
         try:
+            email = resolve_identifier_email(serializer.validated_data["identifier"])
             auth_response = authenticate_with_password(email, serializer.validated_data["password"], request)
+        except UsernameLookupNotFound:
+            record_auth_event("auth.login.password", "FAILURE", request, metadata={"method": "password", "reason": "username_not_found"})
+            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
         except WorkOSPendingAuthentication as exc:
             return _pending_response(request, "auth.login.password", exc)
         except WorkOSConfigurationError:
@@ -206,10 +217,13 @@ class OtpStartView(generics.GenericAPIView):
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        email = resolve_identifier_email(serializer.validated_data["identifier"])
         try:
+            email = resolve_identifier_email(serializer.validated_data["identifier"])
             create_magic_auth(email)
             record_auth_event("auth.login.otp.start", "SUCCESS", request, metadata={"method": "otp"})
+        except UsernameLookupNotFound:
+            record_auth_event("auth.login.otp.start", "FAILURE", request, metadata={"method": "otp", "reason": "username_not_found"})
+            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
         except WorkOSConfigurationError:
             return _workos_config_response()
         except (WorkOSAuthenticationFailed, WorkOSPendingAuthentication):
@@ -225,9 +239,12 @@ class OtpVerifyView(generics.GenericAPIView):
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        email = resolve_identifier_email(serializer.validated_data["identifier"])
         try:
+            email = resolve_identifier_email(serializer.validated_data["identifier"])
             auth_response = authenticate_with_magic_auth(email, serializer.validated_data["code"], request)
+        except UsernameLookupNotFound:
+            record_auth_event("auth.login.otp.verify", "FAILURE", request, metadata={"method": "otp", "reason": "username_not_found"})
+            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
         except WorkOSPendingAuthentication as exc:
             return _pending_response(request, "auth.login.otp.verify", exc)
         except WorkOSConfigurationError:
@@ -236,6 +253,30 @@ class OtpVerifyView(generics.GenericAPIView):
             record_auth_event("auth.login.otp.verify", "FAILURE", request, metadata={"method": "otp"})
             return Response({"detail": GENERIC_AUTH_ERROR}, status=status.HTTP_401_UNAUTHORIZED)
         return _complete_workos_auth(request, auth_response, "auth.login.otp.verify")
+
+
+class EmailVerificationView(generics.GenericAPIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [LoginThrottle]
+    serializer_class = EmailVerificationSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            auth_response = authenticate_with_email_verification(
+                serializer.validated_data["pending_authentication_token"],
+                serializer.validated_data["code"],
+                request,
+            )
+        except WorkOSPendingAuthentication as exc:
+            return _pending_response(request, "auth.login.email.verify", exc)
+        except WorkOSConfigurationError:
+            return _workos_config_response()
+        except WorkOSAuthenticationFailed:
+            record_auth_event("auth.login.email.verify", "FAILURE", request, metadata={"method": "email_verification"})
+            return Response({"detail": GENERIC_AUTH_ERROR}, status=status.HTTP_401_UNAUTHORIZED)
+        return _complete_workos_auth(request, auth_response, "auth.login.email.verify")
 
 
 class MfaChallengeView(generics.GenericAPIView):
@@ -341,12 +382,12 @@ class SignupRequestViewSet(viewsets.ModelViewSet):
     http_method_names = ["get", "post", "head", "options"]
 
     def get_permissions(self):
-        if self.action == "create":
+        if self.action in {"create", "verify_email"}:
             return [AllowAny()]
         return [SignupRequestPermission()]
 
     def get_throttles(self):
-        if self.action == "create":
+        if self.action in {"create", "verify_email"}:
             return [SignupThrottle()]
         return super().get_throttles()
 
@@ -374,7 +415,6 @@ class SignupRequestViewSet(viewsets.ModelViewSet):
         signup_request = serializer.save()
         try:
             signup_request = create_pending_signup(signup_request, password)
-            notify_owner_of_signup(signup_request, request=request)
             record_auth_event(
                 "auth.signup.create",
                 "PENDING",
@@ -397,7 +437,55 @@ class SignupRequestViewSet(viewsets.ModelViewSet):
                 metadata=_auth_failure_metadata("signup", exc),
             )
             return Response({"detail": "Could not complete signup. Please try again."}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(SignupRequestSerializer(signup_request).data, status=status.HTTP_201_CREATED)
+        return Response(signup_email_verification_payload(signup_request), status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=["post"], url_path="verify-email")
+    def verify_email(self, request, pk=None):
+        signup_request = SignupRequest.objects.select_related("company", "user").filter(pk=pk).first()
+        if not signup_request:
+            return Response({"detail": "Signup request not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = SignupEmailVerificationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        should_notify_owner = signup_request.status == SignupRequest.Status.EMAIL_VERIFICATION_PENDING
+        try:
+            signup_request = verify_pending_signup_email(
+                signup_request,
+                serializer.validated_data["code"],
+            )
+            if should_notify_owner:
+                notify_owner_of_signup(signup_request, request=request)
+            record_auth_event(
+                "auth.signup.email.verify",
+                "SUCCESS",
+                request,
+                target_user=signup_request.user,
+                company=signup_request.company,
+                workos_user_id=signup_request.workos_user_id,
+                workos_organization_id=signup_request.workos_organization_id,
+                metadata={"signup_request_id": signup_request.id},
+            )
+        except WorkOSConfigurationError:
+            return _workos_config_response()
+        except (MetroAccessDenied, WorkOSAuthenticationFailed) as exc:
+            record_auth_event(
+                "auth.signup.email.verify",
+                "FAILURE",
+                request,
+                target_user=signup_request.user,
+                company=signup_request.company,
+                workos_user_id=signup_request.workos_user_id,
+                workos_organization_id=signup_request.workos_organization_id,
+                metadata=_auth_failure_metadata("signup_email_verify", exc),
+            )
+            return Response({"detail": "Could not verify email code."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            pending_access_approval_payload(
+                user=signup_request.user,
+                email=signup_request.email,
+                company=signup_request.company,
+            ),
+            status=status.HTTP_202_ACCEPTED,
+        )
 
     @action(detail=True, methods=["post"], url_path="approve")
     def approve(self, request, pk=None):

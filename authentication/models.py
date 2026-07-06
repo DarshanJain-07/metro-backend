@@ -7,12 +7,14 @@ from core.models import Company, generate_ulid
 
 class SignupRequest(models.Model):
     class Status(models.TextChoices):
+        EMAIL_VERIFICATION_PENDING = "EMAIL_VERIFICATION_PENDING", "Email verification pending"
         PENDING = "PENDING", "Pending"
         APPROVED = "APPROVED", "Approved"
         REJECTED = "REJECTED", "Rejected"
 
     id = models.CharField(max_length=26, primary_key=True, default=generate_ulid, editable=False)
     full_name = models.CharField(max_length=255)
+    username = models.CharField(max_length=150, blank=True)
     email = models.EmailField()
     phone = models.CharField(max_length=30, blank=True)
     company_name = models.CharField(max_length=255)
@@ -31,7 +33,7 @@ class SignupRequest(models.Model):
         null=True,
         blank=True,
     )
-    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING)
     workos_user_id = models.CharField(max_length=100, blank=True)
     workos_organization_id = models.CharField(max_length=100, blank=True)
     workos_organization_membership_id = models.CharField(max_length=100, blank=True)
@@ -79,6 +81,36 @@ class SignupRequest(models.Model):
 
     def __str__(self):
         return f"{self.email} - {self.company_name} ({self.status})"
+
+
+class UsernameEmailLookup(models.Model):
+    username = models.CharField(max_length=150, primary_key=True)
+    email = models.EmailField()
+
+    class Meta:
+        ordering = ["username"]
+        constraints = [
+            models.UniqueConstraint(models.functions.Lower("username"), name="unique_lower_auth_username_lookup"),
+        ]
+        indexes = [
+            models.Index(models.functions.Lower("email"), name="auth_userlookup_email_idx"),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.username = normalize_lookup_username(self.username)
+        self.email = normalize_lookup_email(self.email)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.username} -> {self.email}"
+
+
+def normalize_lookup_username(username):
+    return (username or "").strip().lower()
+
+
+def normalize_lookup_email(email):
+    return (email or "").strip().lower()
 
 
 class AuthAuditLog(models.Model):

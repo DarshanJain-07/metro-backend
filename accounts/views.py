@@ -10,6 +10,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
+from core.db_actor import set_database_actor
 from core.models import CompanyOffice, Party
 from core.policies import can_manage_company, shipment_participates_at_office
 from core.request_context import get_current_company, get_current_office
@@ -214,6 +215,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], url_path="generate")
     @transaction.atomic
     def generate(self, request):
+        set_database_actor(request.user)
         serializer = InvoiceGenerateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -251,7 +253,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             office=office,
             party=party,
             invoice_no=f"INV-{uuid.uuid4().hex[:8].upper()}",
-            status=Invoice.Status.SENT,
+            status=Invoice.Status.DRAFT,
             invoice_date=timezone.now().date(),
             due_date=data["due_date"],
             total_amount=total_amount,
@@ -264,6 +266,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 description=f"Freight charges for LR {shipment.lr_no}",
                 amount=shipment.final_freight,
             )
+        invoice.status = Invoice.Status.SENT
+        invoice.save(update_fields=["status"])
         LedgerEntry.objects.create(
             company=company,
             office=office,
@@ -298,6 +302,7 @@ class PaymentReceiptViewSet(viewsets.ModelViewSet):
 
     @transaction.atomic
     def perform_create(self, serializer):
+        set_database_actor(self.request.user)
         company = get_current_company() or getattr(self.request.user, "company", None)
         if not company:
             from rest_framework import serializers as drf_serializers
@@ -336,6 +341,7 @@ class PaymentReceiptViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="verify-bank-payment")
     @transaction.atomic
     def verify_bank_payment(self, request, pk=None):
+        set_database_actor(request.user)
         receipt = self.get_object()
         if receipt.status != PaymentReceipt.Status.PENDING:
             return Response({"error": "Receipt is already processed."}, status=status.HTTP_400_BAD_REQUEST)

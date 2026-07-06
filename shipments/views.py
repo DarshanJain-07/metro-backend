@@ -15,6 +15,7 @@ from rest_framework.response import Response
 from accounts.models import Invoice, InvoiceLine, LedgerEntry
 from accounts.permissions import AccountantPermission
 from accounts.serializers import InvoiceSerializer
+from core.db_actor import set_database_actor
 from core.models import CompanyOffice, Party
 from core.policies import can, can_manage_company, shipment_participates_at_office
 from core.request_context import get_current_company, get_current_office
@@ -206,6 +207,7 @@ class ShipmentViewSet(
     @action(detail=False, methods=["post"], url_path="bill", url_name="bill", permission_classes=[AccountantPermission])
     @transaction.atomic
     def bill_selected_shipments(self, request):
+        set_database_actor(request.user)
         company = get_current_company() or getattr(request.user, "company", None)
         if not company:
             return Response({"detail": "Company context required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -275,7 +277,7 @@ class ShipmentViewSet(
                 office=office,
                 party=party,
                 invoice_no=f"INV-{uuid.uuid4().hex[:8].upper()}",
-                status=Invoice.Status.SENT,
+                status=Invoice.Status.DRAFT,
                 invoice_date=timezone.now().date(),
                 due_date=due_date,
                 total_amount=total_amount,
@@ -288,6 +290,8 @@ class ShipmentViewSet(
                     description=f"Freight charges for LR {shipment.lr_no}",
                     amount=shipment.final_freight,
                 )
+            invoice.status = Invoice.Status.SENT
+            invoice.save(update_fields=["status"])
             LedgerEntry.objects.create(
                 company=company,
                 office=office,

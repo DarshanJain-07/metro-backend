@@ -1,8 +1,11 @@
+import os
+from io import StringIO
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from django.core.management import call_command
 from django.core import mail
-from django.test import override_settings
-from django.test import TestCase
+from django.test import override_settings, SimpleTestCase, TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
@@ -15,6 +18,7 @@ from authentication.workos_service import (
     _create_workos_organization_membership,
     _workos_role_slug_for_metro_role,
 )
+from authentication.bootstrap import bootstrap_owner_after_migrate
 from core.models import City, Company, CompanyOffice, GlobalOffice, Role, State, User, UserMembership
 from core.policies import can
 
@@ -113,6 +117,104 @@ class InvalidRoleWorkOSClient(FakeWorkOSClient):
     def __init__(self):
         super().__init__()
         self.organization_membership = InvalidRoleWorkOSOrganizationMembership()
+
+
+@override_settings(
+    WORKOS_API_KEY="sk_test",
+    WORKOS_CLIENT_ID="client_test",
+    WORKOS_ROLE_SLUGS={"SUPER_ADMIN": "admin"},
+)
+class BootstrapOwnerTests(TestCase):
+    def setUp(self):
+        self.fake_workos = FakeWorkOSClient()
+
+    @patch.dict(
+        os.environ,
+        {
+            "BOOTSTRAP_COMPANY_NAME": "Metro",
+            "BOOTSTRAP_OWNER_EMAIL": "owner@example.com",
+            "BOOTSTRAP_OWNER_PASSWORD": "StrongPass123!",
+            "BOOTSTRAP_OWNER_NAME": "metro",
+        },
+    )
+    @patch("authentication.workos_service.get_workos_client")
+    def test_bootstrap_owner_command_creates_named_owner_and_lookup(self, mock_workos_client):
+        mock_workos_client.return_value = self.fake_workos
+        output = StringIO()
+
+        call_command("bootstrap_owner", "--if-configured", stdout=output)
+
+        company = Company.objects.get(name="Metro")
+        user = User.objects.get(email="owner@example.com")
+        membership = UserMembership.unscoped_objects.get(user=user, company=company)
+        self.assertIn("Owner bootstrap completed.", output.getvalue())
+        self.assertEqual(user.username, "metro")
+        self.assertEqual(user.first_name, "metro")
+        self.assertEqual(user.company, company)
+        self.assertTrue(user.is_active)
+        self.assertTrue(user.is_owner)
+        self.assertTrue(user.is_staff)
+        self.assertFalse(user.has_usable_password())
+        self.assertEqual(company.workos_organization_id, "org_signup_123")
+        self.assertEqual(membership.role, Role.SUPER_ADMIN)
+        self.assertEqual(membership.workos_organization_membership_id, "om_signup_123")
+        self.assertEqual(membership.workos_role_slug, "admin")
+        self.assertEqual(self.fake_workos.organization_membership.created[0]["role"].role_slug, "admin")
+        self.assertTrue(
+            UsernameEmailLookup.objects.filter(
+                username="metro",
+                email="owner@example.com",
+            ).exists()
+        )
+
+
+@override_settings(
+    WORKOS_API_KEY="sk_test",
+    WORKOS_CLIENT_ID="client_test",
+    WORKOS_ROLE_SLUGS={"SUPER_ADMIN": "admin"},
+)
+class BootstrapOwnerHookTests(SimpleTestCase):
+    @patch.dict(
+        os.environ,
+        {
+            "BOOTSTRAP_COMPANY_NAME": "Metro",
+            "BOOTSTRAP_OWNER_EMAIL": "owner@example.com",
+            "BOOTSTRAP_OWNER_PASSWORD": "StrongPass123!",
+            "BOOTSTRAP_OWNER_NAME": "metro",
+        },
+    )
+    @patch("authentication.bootstrap.is_test_process", return_value=False)
+    @patch("authentication.bootstrap.bootstrap_owner_account")
+    def test_post_migrate_bootstrap_runs_when_env_is_configured(self, mock_bootstrap_owner, _mock_is_test_process):
+        mock_bootstrap_owner.return_value = {
+            "company": SimpleNamespace(name="Metro"),
+            "user": SimpleNamespace(email="owner@example.com"),
+        }
+
+        bootstrap_owner_after_migrate(sender=None)
+
+        mock_bootstrap_owner.assert_called_once_with(
+            company_name="Metro",
+            owner_email="owner@example.com",
+            owner_password="StrongPass123!",
+            owner_name="metro",
+        )
+
+    @patch.dict(
+        os.environ,
+        {
+            "BOOTSTRAP_COMPANY_NAME": "Metro",
+            "BOOTSTRAP_OWNER_EMAIL": "",
+            "BOOTSTRAP_OWNER_PASSWORD": "",
+            "BOOTSTRAP_OWNER_NAME": "metro",
+        },
+    )
+    @patch("authentication.bootstrap.is_test_process", return_value=False)
+    @patch("authentication.bootstrap.bootstrap_owner_account")
+    def test_post_migrate_bootstrap_skips_incomplete_env(self, mock_bootstrap_owner, _mock_is_test_process):
+        bootstrap_owner_after_migrate(sender=None)
+
+        mock_bootstrap_owner.assert_not_called()
 
 
 @override_settings(

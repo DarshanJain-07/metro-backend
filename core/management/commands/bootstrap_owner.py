@@ -2,6 +2,7 @@ import os
 
 from django.core.management.base import BaseCommand, CommandError
 
+from authentication.bootstrap import missing_bootstrap_environment
 from authentication.workos_service import WorkOSConfigurationError, bootstrap_owner_account
 
 
@@ -25,15 +26,13 @@ class Command(BaseCommand):
         password = options["password"] or ""
         name = (options["name"] or "").strip()
 
-        missing = [
-            label
-            for label, value in (
-                ("BOOTSTRAP_COMPANY_NAME", company),
-                ("BOOTSTRAP_OWNER_EMAIL", email),
-                ("BOOTSTRAP_OWNER_PASSWORD", password),
-            )
-            if not value
-        ]
+        config = {
+            "company_name": company,
+            "owner_email": email,
+            "owner_password": password,
+            "owner_name": name,
+        }
+        missing = missing_bootstrap_environment(config)
         if missing:
             if options["if_configured"]:
                 self.stdout.write("Owner bootstrap skipped; bootstrap env vars are not fully configured.")
@@ -41,12 +40,7 @@ class Command(BaseCommand):
             raise CommandError(f"Missing required bootstrap values: {', '.join(missing)}")
 
         try:
-            result = bootstrap_owner_account(
-                company_name=company,
-                owner_email=email,
-                owner_password=password,
-                owner_name=name,
-            )
+            result = bootstrap_owner_account(**config)
         except (ValueError, WorkOSConfigurationError) as exc:
             raise CommandError(str(exc)) from exc
         self.stdout.write(self.style.SUCCESS("Owner bootstrap completed."))

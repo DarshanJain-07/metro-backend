@@ -1,5 +1,6 @@
 import logging
 import json
+import re
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -551,6 +552,35 @@ def _unique_username_from_email(email):
     return username
 
 
+def _username_candidate(value):
+    candidate = normalize_lookup_username(value)
+    if "@" in candidate:
+        candidate = candidate.split("@", 1)[0]
+    candidate = re.sub(r"\s+", "_", candidate)
+    candidate = re.sub(r"[^a-z0-9.+_-]", "", candidate)
+    return candidate[:150]
+
+
+def _unique_username_for_user(candidate, *, user=None):
+    base = _username_candidate(candidate) or "user"
+    username = base
+    suffix = 1
+    while True:
+        queryset = User.objects.filter(username__iexact=username)
+        if user and user.pk:
+            queryset = queryset.exclude(pk=user.pk)
+        if not queryset.exists():
+            return username
+        suffix += 1
+        suffix_text = f"_{suffix}"
+        username = f"{base[:150 - len(suffix_text)]}{suffix_text}"
+
+
+def _bootstrap_owner_username(owner_email, owner_name, *, user=None):
+    candidate = _username_candidate(owner_name) or owner_email.split("@", 1)[0]
+    return _unique_username_for_user(candidate, user=user)
+
+
 def _split_full_name(full_name):
     parts = (full_name or "").strip().split()
     if not parts:
@@ -777,7 +807,9 @@ def bootstrap_owner_account(*, company_name, owner_email, owner_password, owner_
         user = User.objects.filter(email__iexact=owner_email).first()
     user_created = user is None
     if not user:
-        user = User(username=_unique_username_from_email(owner_email))
+        user = User(username=_bootstrap_owner_username(owner_email, owner_name))
+    else:
+        user.username = _bootstrap_owner_username(owner_email, owner_name, user=user)
     user.email = owner_email
     user.first_name = first_name
     user.last_name = last_name
@@ -789,6 +821,7 @@ def bootstrap_owner_account(*, company_name, owner_email, owner_password, owner_
     user.is_staff = True
     user.set_unusable_password()
     user.save()
+    upsert_username_email_lookup(username=user.username, email=owner_email)
 
     role_slug = _workos_role_slug_for_metro_role(Role.SUPER_ADMIN)
     workos_membership = _active_membership_for_org(workos_user_id, organization_id) if workos_user_id else None

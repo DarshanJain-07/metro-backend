@@ -117,7 +117,7 @@ INSTALLED_APPS = [
     'django_filters',
     'import_export',
     'core',
-    'authentication',
+    'authentication.apps.AuthenticationConfig',
     'shipments',
     'accounts',
 ]

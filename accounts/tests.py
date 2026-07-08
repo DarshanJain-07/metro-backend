@@ -1,13 +1,15 @@
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.db import DatabaseError, transaction
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from accounts.models import BankPaymentVerification, Invoice, InvoiceLine, PaymentReceipt
+from accounts.models import BankPaymentVerification, Invoice, InvoiceLine, LedgerEntry, PaymentReceipt
+from core.db_actor import set_database_actor
 from core.models import City, Company, CompanyOffice, Party, Role, State, UserMembership
 from shipments.models import Shipment
 
@@ -220,3 +222,88 @@ class BillingApiPermissionTests(TestCase):
         self.assertEqual(office_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(party_response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(PaymentReceipt.objects.count(), 0)
+
+
+class AccountingDatabaseIntegrityTests(TestCase):
+    def setUp(self):
+        self.company = Company.objects.create(name="Metro Express")
+        self.state = State.objects.create(name="Maharashtra", code="MH")
+        self.city = City.objects.create(name="Mumbai", state=self.state)
+        self.office = CompanyOffice.objects.create(company=self.company, name="Mumbai Office", city=self.city)
+        self.party = Party.objects.create(company=self.company, name="Customer", phone="1234567890", city=self.city)
+        self.accountant = User.objects.create_user(username="accountant_db", password="pw", company=self.company, office=self.office)
+        self.viewer = User.objects.create_user(username="viewer_db", password="pw", company=self.company, office=self.office)
+        UserMembership.objects.create(user=self.accountant, company=self.company, office=self.office, role=Role.ACCOUNTANT)
+        UserMembership.objects.create(user=self.viewer, company=self.company, office=self.office, role=Role.VIEWER)
+
+    def make_ledger(self):
+        return LedgerEntry.objects.create(
+            company=self.company,
+            office=self.office,
+            party=self.party,
+            entry_type=LedgerEntry.EntryType.DEBIT,
+            reference_type=LedgerEntry.ReferenceType.INVOICE,
+            reference_id="INV-TEST",
+            debit=Decimal("100.00"),
+            entry_date=timezone.now().date(),
+        )
+
+    def test_ledger_entry_requires_one_sided_amount(self):
+        with self.assertRaises(DatabaseError):
+            with transaction.atomic():
+                LedgerEntry.objects.create(
+                    company=self.company,
+                    office=self.office,
+                    party=self.party,
+                    entry_type=LedgerEntry.EntryType.DEBIT,
+                    reference_type=LedgerEntry.ReferenceType.INVOICE,
+                    reference_id="INV-BAD",
+                    debit=Decimal("100.00"),
+                    credit=Decimal("1.00"),
+                    entry_date=timezone.now().date(),
+                )
+
+    def test_ledger_update_requires_database_actor_with_edit_authority(self):
+        ledger = self.make_ledger()
+
+        with self.assertRaises(DatabaseError):
+            with transaction.atomic():
+                set_database_actor(self.viewer)
+                LedgerEntry.objects.filter(pk=ledger.pk).update(debit=Decimal("125.00"))
+
+        ledger.refresh_from_db()
+        self.assertEqual(ledger.debit, Decimal("100.00"))
+
+        with transaction.atomic():
+            set_database_actor(self.accountant)
+            LedgerEntry.objects.filter(pk=ledger.pk).update(debit=Decimal("125.00"))
+
+        ledger.refresh_from_db()
+        self.assertEqual(ledger.debit, Decimal("125.00"))
+
+    def test_posted_invoice_business_fields_are_read_only(self):
+        invoice = Invoice.objects.create(
+            company=self.company,
+            office=self.office,
+            party=self.party,
+            invoice_no="INV001",
+            status=Invoice.Status.SENT,
+            invoice_date=timezone.now().date(),
+            due_date=timezone.now().date(),
+            total_amount=Decimal("100.00"),
+        )
+
+        with self.assertRaises(DatabaseError):
+            with transaction.atomic():
+                Invoice.objects.filter(pk=invoice.pk).update(total_amount=Decimal("150.00"))
+
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.total_amount, Decimal("100.00"))
+
+        Invoice.objects.filter(pk=invoice.pk).update(status=Invoice.Status.PAID)
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.status, Invoice.Status.PAID)
+
+        with self.assertRaises(DatabaseError):
+            with transaction.atomic():
+                Invoice.objects.filter(pk=invoice.pk).update(status=Invoice.Status.DRAFT)

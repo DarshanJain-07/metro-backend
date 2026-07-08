@@ -16,6 +16,7 @@ from datetime import timedelta
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from dotenv import load_dotenv
+from import_export.formats.base_formats import CSV, XLSX
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -102,21 +103,33 @@ if 'pytest' in sys.modules or 'test' in sys.argv:
     CELERY_TASK_ALWAYS_EAGER = True
 
 INSTALLED_APPS = [
+    'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'django.contrib.postgres',
+    'pgtrigger',
     'rest_framework',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'django_filters',
+    'import_export',
     'core',
     'authentication',
     'shipments',
     'accounts',
 ]
+
+IMPORT_EXPORT_USE_TRANSACTIONS = True
+IMPORT_EXPORT_IMPORT_IGNORE_BLANK_LINES = True
+IMPORT_EXPORT_ESCAPE_FORMULAE_ON_EXPORT = True
+IMPORT_EXPORT_ESCAPE_ILLEGAL_CHARS_ON_EXPORT = True
+IMPORT_EXPORT_FORMATS = [CSV, XLSX]
+IMPORT_FORMATS = [CSV, XLSX]
+EXPORT_FORMATS = [CSV, XLSX]
+IMPORT_EXPORT_MAX_UPLOAD_SIZE = int(os.environ.get('IMPORT_EXPORT_MAX_UPLOAD_SIZE', 10 * 1024 * 1024))
 
 AUTH_USER_MODEL = 'core.User'
 

@@ -6,14 +6,18 @@ from django.db import transaction
 from django.db.models import Count, Exists, OuterRef, Sum
 from django.utils import timezone
 from django.db.models.functions import TruncDate
+from django.utils.dateparse import parse_date
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
+from core.db_actor import set_database_actor
+from core.import_export_api import ImportExportViewSetMixin
 from core.models import CompanyOffice, Party
 from core.policies import can_manage_company, shipment_participates_at_office
 from core.request_context import get_current_company, get_current_office
 from shipments.models import Shipment
+from .import_export_resources import ExpenseResource, InvoiceResource
 from .models import BankPaymentVerification, Expense, Invoice, InvoiceLine, LedgerEntry, PaymentReceipt
 from .permissions import AccountantPermission
 from .serializers import (
@@ -192,18 +196,32 @@ class CashbookViewSet(viewsets.ViewSet):
         })
 
 
-class InvoiceViewSet(viewsets.ModelViewSet):
+class InvoiceViewSet(ImportExportViewSetMixin, viewsets.ModelViewSet):
     serializer_class = InvoiceSerializer
     permission_classes = [AccountantPermission]
     permission_resource = "invoice"
     action_permissions = {"generate": "invoice:generate"}
     queryset = Invoice.objects.all()
+    import_export_resource_class = InvoiceResource
+    export_filename = "invoices"
 
     def get_queryset(self):
         company = get_current_company()
         if not company:
             return Invoice.objects.none()
         qs = Invoice.objects.filter(company=company).select_related("office", "party").prefetch_related("lines")
+        party_param = self.request.query_params.get("customer_id") or self.request.query_params.get("party")
+        if party_param:
+            qs = qs.filter(party_id=party_param)
+        office_param = self.request.query_params.get("office")
+        if office_param:
+            qs = qs.filter(office_id=office_param)
+        from_date = parse_date(str(self.request.query_params.get("from_date") or ""))
+        if from_date:
+            qs = qs.filter(invoice_date__gte=from_date)
+        to_date = parse_date(str(self.request.query_params.get("to_date") or ""))
+        if to_date:
+            qs = qs.filter(invoice_date__lte=to_date)
         if not can_manage_company(self.request.user, company):
             office = get_current_office()
             if not office:
@@ -214,6 +232,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], url_path="generate")
     @transaction.atomic
     def generate(self, request):
+        set_database_actor(request.user)
         serializer = InvoiceGenerateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -251,7 +270,7 @@ class InvoiceViewSet(viewsets.ModelViewSet):
             office=office,
             party=party,
             invoice_no=f"INV-{uuid.uuid4().hex[:8].upper()}",
-            status=Invoice.Status.SENT,
+            status=Invoice.Status.DRAFT,
             invoice_date=timezone.now().date(),
             due_date=data["due_date"],
             total_amount=total_amount,
@@ -264,6 +283,8 @@ class InvoiceViewSet(viewsets.ModelViewSet):
                 description=f"Freight charges for LR {shipment.lr_no}",
                 amount=shipment.final_freight,
             )
+        invoice.status = Invoice.Status.SENT
+        invoice.save(update_fields=["status"])
         LedgerEntry.objects.create(
             company=company,
             office=office,
@@ -298,6 +319,7 @@ class PaymentReceiptViewSet(viewsets.ModelViewSet):
 
     @transaction.atomic
     def perform_create(self, serializer):
+        set_database_actor(self.request.user)
         company = get_current_company() or getattr(self.request.user, "company", None)
         if not company:
             from rest_framework import serializers as drf_serializers
@@ -336,6 +358,7 @@ class PaymentReceiptViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="verify-bank-payment")
     @transaction.atomic
     def verify_bank_payment(self, request, pk=None):
+        set_database_actor(request.user)
         receipt = self.get_object()
         if receipt.status != PaymentReceipt.Status.PENDING:
             return Response({"error": "Receipt is already processed."}, status=status.HTTP_400_BAD_REQUEST)
@@ -384,7 +407,7 @@ class LedgerEntryViewSet(viewsets.ReadOnlyModelViewSet):
         return qs
 
 
-class ExpenseViewSet(viewsets.ModelViewSet):
+class ExpenseViewSet(ImportExportViewSetMixin, viewsets.ModelViewSet):
     serializer_class = ExpenseSerializer
     permission_classes = [AccountantPermission]
     permission_resource = "expense"
@@ -393,6 +416,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         "daily_summary": "expense:view",
     }
     queryset = Expense.objects.all()
+    import_export_resource_class = ExpenseResource
+    export_filename = "expenses"
 
     def get_queryset(self):
         company = get_current_company()

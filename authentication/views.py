@@ -11,6 +11,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
 from .serializers import (
     ChangePasswordSerializer,
+    ClientSuperAdminCreateSerializer,
     CompanyRolePermissionOverrideSerializer,
     EmailVerificationSerializer,
     LogoutSerializer,
@@ -41,14 +42,17 @@ from .workos_service import (
     WorkOSPendingAuthentication,
     UsernameLookupNotFound,
     as_plain_data,
+    authenticate_with_email_verification,
     authenticate_with_magic_auth,
     authenticate_with_organization_selection,
     authenticate_with_password,
     authenticate_with_totp,
     challenge_mfa_factor,
     create_magic_auth,
+    create_client_super_admin_account,
     issue_metro_tokens,
     record_auth_event,
+    record_verified_username_lookup,
     request_ip,
     request_user_agent,
     resolve_identifier_email,
@@ -63,7 +67,7 @@ from .workos_service import (
     verify_pending_signup_email,
 )
 from authentication.models import SignupRequest
-from core.models import CompanyRolePermissionOverride, PermissionCatalog, RoleDefinition, UserMembership
+from core.models import Company, CompanyRolePermissionOverride, PermissionCatalog, Role, RoleDefinition, UserMembership
 from core.serializers import CompanyOfficeSerializer
 from core.policies import (
     active_role_definitions,
@@ -141,6 +145,7 @@ def _complete_workos_auth(request, auth_response, event_type):
     try:
         user, company = sync_workos_authentication(auth_response)
     except WorkOSPendingAuthentication as exc:
+        record_verified_username_lookup(as_plain_data(auth_response).get("user"))
         return _pending_response(request, event_type, exc)
     except (MetroAccessDenied, WorkOSAuthenticationFailed):
         record_auth_event(
@@ -598,6 +603,11 @@ class UserViewSet(viewsets.ModelViewSet):
     serializer_class = UserSerializer
     permission_classes = [UserManagementPermission]
 
+    def get_permissions(self):
+        if self.action in {"clients", "create_client_super_admin"}:
+            return [IsAuthenticated()]
+        return super().get_permissions()
+
     def get_queryset(self):
         base_qs = User.objects.select_related("company", "office").prefetch_related(
             "memberships",
@@ -616,6 +626,113 @@ class UserViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         company = get_current_company()
         serializer.save(company=company)
+
+    @action(detail=False, methods=["get"], url_path="clients")
+    def clients(self, request):
+        if not request.user.is_owner:
+            return Response({"detail": "Only the platform owner can view client companies."}, status=status.HTTP_403_FORBIDDEN)
+
+        owner_company = get_current_company() or getattr(request.user, "company", None)
+        companies = Company.objects.filter(is_active=True).order_by("name", "id")
+        if owner_company:
+            companies = companies.exclude(pk=owner_company.pk)
+        companies = list(
+            companies.exclude(users__is_owner=True, users__is_active=True).distinct()
+        )
+        company_ids = [company.id for company in companies]
+        super_admins_by_company = {company_id: [] for company_id in company_ids}
+        memberships = (
+            UserMembership.unscoped_objects.filter(
+                company_id__in=company_ids,
+                role=Role.SUPER_ADMIN,
+                is_active=True,
+                user__is_active=True,
+            )
+            .select_related("user")
+            .order_by("user__email", "user__username", "id")
+        )
+        for membership in memberships:
+            super_admins_by_company.setdefault(membership.company_id, []).append(
+                {
+                    "id": membership.user.id,
+                    "username": membership.user.username,
+                    "email": membership.user.email,
+                    "first_name": membership.user.first_name,
+                    "last_name": membership.user.last_name,
+                    "membership_id": membership.id,
+                }
+            )
+
+        return Response(
+            [
+                {
+                    "id": company.id,
+                    "name": company.name,
+                    "organization_id": company.signup_code,
+                    "workos_organization_id": company.workos_organization_id,
+                    "is_active": company.is_active,
+                    "created_at": company.created_at,
+                    "super_admins": super_admins_by_company.get(company.id, []),
+                }
+                for company in companies
+            ]
+        )
+
+    @action(detail=False, methods=["post"], url_path="client-super-admin")
+    def create_client_super_admin(self, request):
+        if not request.user.is_owner:
+            return Response({"detail": "Only the platform owner can create client admins."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = ClientSuperAdminCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            result = create_client_super_admin_account(
+                company_name=serializer.validated_data["company_name"],
+                admin_email=serializer.validated_data["email"],
+                admin_password=serializer.validated_data["password"],
+                admin_name=serializer.validated_data["full_name"],
+                username=serializer.validated_data["username"],
+            )
+        except WorkOSConfigurationError:
+            return _workos_config_response()
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        record_auth_event(
+            "auth.client_super_admin.create",
+            "SUCCESS",
+            request,
+            actor=request.user,
+            target_user=result["user"],
+            company=result["company"],
+            workos_user_id=result["workos_user_id"],
+            workos_organization_id=result["workos_organization_id"],
+            metadata={"created_company_id": result["company"].id},
+        )
+        return Response(
+            {
+                "company": {
+                    "id": result["company"].id,
+                    "name": result["company"].name,
+                    "organization_id": result["organization_id"],
+                    "workos_organization_id": result["workos_organization_id"],
+                },
+                "user": {
+                    "id": result["user"].id,
+                    "username": result["user"].username,
+                    "email": result["user"].email,
+                    "first_name": result["user"].first_name,
+                    "last_name": result["user"].last_name,
+                    "is_owner": result["user"].is_owner,
+                },
+                "membership": {
+                    "id": result["membership"].id,
+                    "role": result["membership"].role,
+                    "workos_organization_membership_id": result["workos_membership_id"],
+                },
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=False, methods=["get"], url_path="assignable-branches")
     def assignable_branches(self, request):

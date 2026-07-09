@@ -184,6 +184,57 @@ class OfficeRegistryArchitectureTests(TestCase):
         office.refresh_from_db()
         self.assertIsNotNone(office.global_office_id)
 
+    def test_company_directory_lists_external_companies_without_offices(self):
+        empty_company = Company.objects.create(name="Pune Direct")
+        inactive_company = Company.objects.create(name="Inactive Carrier", is_active=False)
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(
+            reverse("master-list", kwargs={"resource": "companies"}),
+            {"include_inactive": "false", "ordering": "name"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        items = response.data.get("results", response.data)
+        names = {item["name"] for item in items}
+        self.assertIn(self.other_company.name, names)
+        self.assertIn(empty_company.name, names)
+        self.assertNotIn(self.company.name, names)
+        self.assertNotIn(inactive_company.name, names)
+        self.assertNotIn("signup_code", items[0])
+
+    def test_company_directory_includes_platform_owner_company_for_clients(self):
+        owner_company = Company.objects.create(name="Metro Bootstrap", is_active=False)
+        User.objects.create_user(
+            username="bootstrap_owner",
+            password="pw",
+            company=owner_company,
+            is_owner=True,
+        )
+        client_company = Company.objects.create(name="Client Carrier")
+        client_user = User.objects.create_user(
+            username="client_owner",
+            password="pw",
+            company=client_company,
+        )
+        UserMembership.objects.create(
+            user=client_user,
+            company=client_company,
+            role=Role.SUPER_ADMIN,
+        )
+
+        self.client.force_authenticate(user=client_user)
+        response = self.client.get(
+            reverse("master-list", kwargs={"resource": "companies"}),
+            {"include_inactive": "false", "ordering": "name"},
+            HTTP_X_COMPANY_ID=str(client_company.id),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        names = {item["name"] for item in response.data.get("results", response.data)}
+        self.assertIn(owner_company.name, names)
+        self.assertNotIn(client_company.name, names)
+
     def test_office_list_includes_owner_company_debug_field(self):
         office = CompanyOffice.objects.create(
             company=self.company,

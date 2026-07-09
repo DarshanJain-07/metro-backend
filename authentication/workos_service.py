@@ -742,6 +742,38 @@ def _find_or_create_owner_workos_user(company, email, full_name, password):
     )
 
 
+def _find_or_create_client_super_admin_workos_user(company, email, full_name, username, password):
+    client = get_workos_client()
+    email = email.strip().lower()
+    first_name, last_name = _split_full_name(full_name)
+    existing = _first_page_item(client.user_management.list_users(email=email, limit=1))
+    metadata = {
+        "metro_client_super_admin": "true",
+        "metro_company_id": str(company.id),
+        "metro_company_name": company.name,
+        "metro_username": username,
+    }
+    if existing:
+        return client.user_management.update_user(
+            as_plain_data(existing)["id"],
+            first_name=first_name,
+            last_name=last_name,
+            name=full_name,
+            password=_workos_password(password),
+            metadata=metadata,
+        )
+
+    return client.user_management.create_user(
+        email=email,
+        first_name=first_name,
+        last_name=last_name,
+        name=full_name,
+        email_verified=True,
+        password=_workos_password(password),
+        metadata=metadata,
+    )
+
+
 def _ensure_local_signup_user(signup_request, workos_user):
     workos_data = as_plain_data(workos_user)
     email = (workos_data.get("email") or signup_request.email).strip().lower()
@@ -850,6 +882,111 @@ def bootstrap_owner_account(*, company_name, owner_email, owner_password, owner_
         "user_created": user_created,
         "membership": membership,
         "membership_created": membership_created,
+        "workos_organization_id": organization_id,
+        "workos_user_id": workos_user_id,
+        "workos_membership_id": membership_id,
+        "organization_id": company.signup_code,
+    }
+
+
+@transaction.atomic
+def create_client_super_admin_account(*, company_name, admin_email, admin_password, admin_name, username):
+    seed_role_templates()
+    company_name = company_name.strip()
+    admin_email = admin_email.strip().lower()
+    admin_name = admin_name.strip()
+    username = normalize_lookup_username(username)
+    if not company_name:
+        raise ValueError("company_name is required.")
+    if Company.objects.filter(name__iexact=company_name).exists():
+        raise ValueError("A company with this name already exists.")
+    if not admin_email:
+        raise ValueError("admin_email is required.")
+    if not admin_password:
+        raise ValueError("admin_password is required.")
+    if not admin_name:
+        raise ValueError("admin_name is required.")
+    if not username:
+        raise ValueError("username is required.")
+    if User.objects.filter(email__iexact=admin_email, is_active=True).exists():
+        raise ValueError("An active account with this email already exists.")
+    if User.objects.filter(username__iexact=username).exists():
+        raise ValueError("This username is already taken.")
+    if UsernameEmailLookup.objects.filter(username__iexact=username).exists():
+        raise ValueError("This username is already taken.")
+
+    company = Company.objects.create(name=company_name, is_active=True)
+    organization = _find_or_create_workos_organization(company)
+    organization_id = as_plain_data(organization).get("id") or company.workos_organization_id
+    if not organization_id:
+        raise WorkOSConfigurationError("WorkOS organization creation did not return an ID.")
+
+    workos_user = _find_or_create_client_super_admin_workos_user(
+        company,
+        admin_email,
+        admin_name,
+        username,
+        admin_password,
+    )
+    workos_user_data = as_plain_data(workos_user)
+    workos_user_id = workos_user_data.get("id") or workos_user_data.get("user_id") or ""
+    if not workos_user_id:
+        raise WorkOSConfigurationError("WorkOS user creation did not return an ID.")
+
+    first_name, last_name = _split_full_name(admin_name)
+    user = User.objects.filter(workos_user_id=workos_user_id).first()
+    if not user:
+        user = User.objects.filter(email__iexact=admin_email).first()
+    if user and user.is_active:
+        raise ValueError("An active account with this email already exists.")
+    if user:
+        if User.objects.filter(username__iexact=username).exclude(pk=user.pk).exists():
+            raise ValueError("This username is already taken.")
+        user.username = username
+    else:
+        user = User(username=username)
+    user.email = admin_email
+    user.first_name = first_name
+    user.last_name = last_name
+    user.company = company
+    user.office = None
+    user.workos_user_id = workos_user_id
+    user.is_active = True
+    user.is_owner = False
+    user.is_staff = False
+    user.set_unusable_password()
+    user.save()
+    upsert_username_email_lookup(username=user.username, email=admin_email)
+
+    role_slug = _workos_role_slug_for_metro_role(Role.SUPER_ADMIN)
+    workos_membership = _active_membership_for_org(workos_user_id, organization_id)
+    if workos_membership:
+        membership_id = as_plain_data(workos_membership).get("id", "")
+        if membership_id:
+            workos_membership = _update_workos_organization_membership_role(
+                membership_id,
+                role_slug,
+            )
+    else:
+        workos_membership = _create_workos_organization_membership(
+            user_id=workos_user_id,
+            organization_id=organization_id,
+            role_slug=role_slug,
+        )
+    membership_id = as_plain_data(workos_membership).get("id", "")
+    membership = UserMembership.unscoped_objects.create(
+        user=user,
+        company=company,
+        office=None,
+        role=Role.SUPER_ADMIN,
+        is_active=True,
+        workos_organization_membership_id=membership_id,
+        workos_role_slug=role_slug,
+    )
+    return {
+        "company": company,
+        "user": user,
+        "membership": membership,
         "workos_organization_id": organization_id,
         "workos_user_id": workos_user_id,
         "workos_membership_id": membership_id,

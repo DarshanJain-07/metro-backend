@@ -275,6 +275,69 @@ class SignupRejectSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True)
 
 
+class ClientSuperAdminCreateSerializer(serializers.Serializer):
+    company_name = serializers.CharField(trim_whitespace=True)
+    full_name = serializers.CharField(trim_whitespace=True)
+    username = serializers.CharField(trim_whitespace=True)
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, min_length=10, trim_whitespace=False)
+
+    def validate_company_name(self, value):
+        company_name = value.strip()
+        if not company_name:
+            raise serializers.ValidationError("Company name is required.")
+        if Company.objects.filter(name__iexact=company_name).exists():
+            raise serializers.ValidationError("A company with this name already exists.")
+        return company_name
+
+    def validate_full_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Full name is required.")
+        return value
+
+    def validate_username(self, value):
+        username = normalize_lookup_username(value)
+        if not username:
+            raise serializers.ValidationError("Username is required.")
+        if "@" in username:
+            raise serializers.ValidationError("Username must not be an email address.")
+        if User.objects.filter(username__iexact=username).exists():
+            raise serializers.ValidationError("This username is already taken.")
+        if UsernameEmailLookup.objects.filter(username__iexact=username).exists():
+            raise serializers.ValidationError("This username is already taken.")
+        if (
+            SignupRequest.objects.filter(username__iexact=username)
+            .exclude(status=SignupRequest.Status.REJECTED)
+            .exists()
+        ):
+            raise serializers.ValidationError("This username is already taken.")
+        return username
+
+    def validate_email(self, value):
+        email = value.strip().lower()
+        if User.objects.filter(email__iexact=email, is_active=True).exists():
+            raise serializers.ValidationError("An account with this email already exists.")
+        if (
+            SignupRequest.objects.filter(email__iexact=email)
+            .exclude(status=SignupRequest.Status.REJECTED)
+            .exists()
+        ):
+            raise serializers.ValidationError("A signup for this email already exists.")
+        return email
+
+    def validate_password(self, value):
+        if (
+            len(value) < 10
+            or not re.search(r"[A-Z]", value)
+            or not re.search(r"[a-z]", value)
+            or not re.search(r"\d", value)
+            or not re.search(r"[^A-Za-z0-9\s]", value)
+        ):
+            raise serializers.ValidationError(WORKOS_PASSWORD_REQUIREMENT_MESSAGE)
+        return value
+
+
 def assignable_user_offices(company):
     return (
         CompanyOffice.unscoped_objects.filter(

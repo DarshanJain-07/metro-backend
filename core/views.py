@@ -10,7 +10,7 @@ from rest_framework.views import APIView
 
 from core.import_export_api import ImportExportViewSetMixin, dataset_from_rows
 from core.import_export_resources import MASTER_IMPORT_EXPORT_RESOURCES
-from core.models import City, CompanyOffice, GlobalOffice, MasterScope, OfficeStatus, Party, State
+from core.models import City, Company, CompanyOffice, GlobalOffice, MasterScope, OfficeStatus, Party, State
 from core.policies import (
     active_office_ids,
     assign_master_scope,
@@ -22,6 +22,7 @@ from core.policies import (
 from core.request_context import get_current_company, get_current_office, get_current_role
 from core.serializers import (
     CitySerializer,
+    CompanyDiscoverySerializer,
     CompanyOfficeSerializer,
     GlobalOfficeSerializer,
     OfficeImportSerializer,
@@ -205,6 +206,14 @@ class MasterDataViewSet(ImportExportViewSetMixin, IdempotentCreateMixin, Optimis
             "company_scoped": False,
             "select_related": ["state"],
         },
+        "companies": {
+            "model": Company,
+            "serializer_class": CompanyDiscoverySerializer,
+            "search_fields": ["name"],
+            "has_is_active": True,
+            "company_scoped": False,
+            "select_related": [],
+        },
         "global-offices": {
             "model": GlobalOffice,
             "serializer_class": GlobalOfficeSerializer,
@@ -253,7 +262,8 @@ class MasterDataViewSet(ImportExportViewSetMixin, IdempotentCreateMixin, Optimis
 
     def get_queryset(self):
         config = self._get_config()
-        if self.kwargs.get("resource") == "global-offices":
+        resource = self.kwargs.get("resource")
+        if resource == "global-offices":
             materialize_global_offices_from_company_offices()
 
         model = config["model"]
@@ -265,8 +275,18 @@ class MasterDataViewSet(ImportExportViewSetMixin, IdempotentCreateMixin, Optimis
         if config["has_is_active"]:
             include_inactive = self.request.query_params.get("include_inactive", "true") == "true"
             if not include_inactive:
-                qs = qs.filter(is_active=True)
-        if self.kwargs.get("resource") == "offices":
+                if resource == "companies":
+                    qs = qs.filter(
+                        models.Q(is_active=True)
+                        | models.Q(users__is_owner=True, users__is_active=True)
+                    ).distinct()
+                else:
+                    qs = qs.filter(is_active=True)
+        if resource == "companies":
+            company = get_current_company()
+            if company:
+                qs = qs.exclude(pk=company.pk)
+        if resource == "offices":
             own_company_only = self.request.query_params.get("own_company_only", "false") == "true"
             company = get_current_company()
             if own_company_only:

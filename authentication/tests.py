@@ -173,6 +173,200 @@ class BootstrapOwnerTests(TestCase):
     WORKOS_CLIENT_ID="client_test",
     WORKOS_ROLE_SLUGS={"SUPER_ADMIN": "admin"},
 )
+class ClientSuperAdminProvisioningTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.fake_workos = FakeWorkOSClient()
+
+    @patch("authentication.workos_service.get_workos_client")
+    def test_platform_owner_can_create_client_super_admin(self, mock_workos_client):
+        mock_workos_client.return_value = self.fake_workos
+        platform_company = Company.objects.create(name="Metro")
+        platform_owner = User.objects.create_user(
+            username="owner",
+            email="owner@example.com",
+            company=platform_company,
+            is_active=True,
+            is_owner=True,
+        )
+        UserMembership.unscoped_objects.create(
+            user=platform_owner,
+            company=platform_company,
+            role=Role.SUPER_ADMIN,
+            is_active=True,
+        )
+        self.client.force_authenticate(user=platform_owner)
+
+        response = self.client.post(
+            reverse("user-create-client-super-admin"),
+            {
+                "company_name": "Client Logistics",
+                "full_name": "Client Admin",
+                "username": "clientadmin",
+                "email": "client.admin@example.com",
+                "password": "StrongPass123!",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        company = Company.objects.get(name="Client Logistics")
+        user = User.objects.get(email="client.admin@example.com")
+        membership = UserMembership.unscoped_objects.get(user=user, company=company)
+        self.assertTrue(company.is_active)
+        self.assertEqual(response.data["company"]["organization_id"], company.signup_code)
+        self.assertEqual(company.workos_organization_id, "org_signup_123")
+        self.assertEqual(user.username, "clientadmin")
+        self.assertEqual(user.company, company)
+        self.assertTrue(user.is_active)
+        self.assertFalse(user.is_owner)
+        self.assertFalse(user.has_usable_password())
+        self.assertEqual(membership.role, Role.SUPER_ADMIN)
+        self.assertEqual(membership.workos_role_slug, "admin")
+        self.assertEqual(self.fake_workos.organizations.created[0]["name"], "Client Logistics")
+        self.assertEqual(self.fake_workos.user_management.created[0]["email"], "client.admin@example.com")
+        self.assertEqual(self.fake_workos.organization_membership.created[0]["role"].role_slug, "admin")
+        self.assertTrue(
+            UsernameEmailLookup.objects.filter(
+                username="clientadmin",
+                email="client.admin@example.com",
+            ).exists()
+        )
+
+    def test_platform_owner_can_list_persisted_client_companies(self):
+        platform_company = Company.objects.create(name="Metro")
+        platform_owner = User.objects.create_user(
+            username="owner",
+            email="owner@example.com",
+            company=platform_company,
+            is_active=True,
+            is_owner=True,
+        )
+        UserMembership.unscoped_objects.create(
+            user=platform_owner,
+            company=platform_company,
+            role=Role.SUPER_ADMIN,
+            is_active=True,
+        )
+        client_company = Company.objects.create(
+            name="Client Logistics",
+            workos_organization_id="org_client_123",
+        )
+        client_admin = User.objects.create_user(
+            username="clientadmin",
+            email="client.admin@example.com",
+            company=client_company,
+            is_active=True,
+        )
+        UserMembership.unscoped_objects.create(
+            user=client_admin,
+            company=client_company,
+            role=Role.SUPER_ADMIN,
+            is_active=True,
+        )
+        self.client.force_authenticate(user=platform_owner)
+
+        response = self.client.get(
+            reverse("user-clients"),
+            HTTP_X_COMPANY_ID=str(platform_company.id),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(len(response.data), 1)
+        self.assertEqual(response.data[0]["name"], "Client Logistics")
+        self.assertEqual(response.data[0]["organization_id"], client_company.signup_code)
+        self.assertEqual(response.data[0]["workos_organization_id"], "org_client_123")
+        self.assertEqual(response.data[0]["super_admins"][0]["email"], "client.admin@example.com")
+
+    def test_client_super_admin_cannot_list_client_companies(self):
+        company = Company.objects.create(name="Existing Client")
+        client_admin = User.objects.create_user(
+            username="clientadmin",
+            email="client.admin@example.com",
+            company=company,
+            is_active=True,
+        )
+        UserMembership.unscoped_objects.create(
+            user=client_admin,
+            company=company,
+            role=Role.SUPER_ADMIN,
+            is_active=True,
+        )
+        self.client.force_authenticate(user=client_admin)
+
+        response = self.client.get(
+            reverse("user-clients"),
+            HTTP_X_COMPANY_ID=str(company.id),
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch("authentication.workos_service.get_workos_client")
+    def test_client_super_admin_cannot_create_another_client_company(self, mock_workos_client):
+        mock_workos_client.return_value = self.fake_workos
+        company = Company.objects.create(name="Existing Client")
+        client_admin = User.objects.create_user(
+            username="clientadmin",
+            email="client.admin@example.com",
+            company=company,
+            is_active=True,
+        )
+        UserMembership.unscoped_objects.create(
+            user=client_admin,
+            company=company,
+            role=Role.SUPER_ADMIN,
+            is_active=True,
+        )
+        self.client.force_authenticate(user=client_admin)
+
+        response = self.client.post(
+            reverse("user-create-client-super-admin"),
+            {
+                "company_name": "Other Client",
+                "full_name": "Other Admin",
+                "username": "otheradmin",
+                "email": "other.admin@example.com",
+                "password": "StrongPass123!",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(Company.objects.filter(name="Other Client").exists())
+        self.assertFalse(self.fake_workos.organizations.created)
+
+    @patch("authentication.workos_service.get_workos_client")
+    def test_django_superuser_without_owner_flag_cannot_create_client_company(self, mock_workos_client):
+        mock_workos_client.return_value = self.fake_workos
+        superuser = User.objects.create_superuser(
+            username="superuser",
+            email="superuser@example.com",
+            password="StrongPass123!",
+        )
+        self.client.force_authenticate(user=superuser)
+
+        response = self.client.post(
+            reverse("user-create-client-super-admin"),
+            {
+                "company_name": "Other Client",
+                "full_name": "Other Admin",
+                "username": "otheradmin",
+                "email": "other.admin@example.com",
+                "password": "StrongPass123!",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(Company.objects.filter(name="Other Client").exists())
+        self.assertFalse(self.fake_workos.organizations.created)
+
+
+@override_settings(
+    WORKOS_API_KEY="sk_test",
+    WORKOS_CLIENT_ID="client_test",
+    WORKOS_ROLE_SLUGS={"SUPER_ADMIN": "admin"},
+)
 class BootstrapOwnerHookTests(SimpleTestCase):
     @patch.dict(
         os.environ,
@@ -267,6 +461,25 @@ class SignupRequestTests(TestCase):
         self.assertEqual(self.fake_workos.user_management.verification_emails, ["user_signup_123"])
         self.assertFalse(UsernameEmailLookup.objects.filter(username="newuser").exists())
         self.assertEqual(len(mail.outbox), 0)
+
+    def test_public_signup_requires_existing_organization_id(self):
+        response = self.client.post(
+            reverse("signup-request-list"),
+            {
+                "full_name": "New User",
+                "username": "newuser",
+                "email": "new.user@example.com",
+                "company_name": "New Company",
+                "phone": "9999999999",
+                "password": "StrongPass123!",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("organization_id", response.data)
+        self.assertFalse(Company.objects.filter(name="New Company").exists())
+        self.assertFalse(self.fake_workos.user_management.created)
 
     @patch("authentication.workos_service.get_workos_client")
     def test_public_signup_email_verification_moves_request_to_approval_pending(self, mock_workos_client):

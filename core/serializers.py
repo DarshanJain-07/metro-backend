@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import City, CompanyOffice, GlobalOffice, OfficeStatus, Party, State
+from .models import City, Company, CompanyOffice, GlobalOffice, OfficeStatus, Party, State
 
 
 class StateSerializer(serializers.ModelSerializer):
@@ -18,6 +18,13 @@ class CitySerializer(serializers.ModelSerializer):
         model = City
         fields = ("id", "name", "state", "state_name", "state_code", "is_active", "created_at", "updated_at")
         read_only_fields = ("id", "state_name", "state_code", "created_at", "updated_at")
+
+
+class CompanyDiscoverySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Company
+        fields = ("id", "name", "is_active", "created_at")
+        read_only_fields = fields
 
 
 class GlobalOfficeSerializer(serializers.ModelSerializer):

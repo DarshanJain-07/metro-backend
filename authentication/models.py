@@ -105,6 +105,40 @@ class UsernameEmailLookup(models.Model):
         return f"{self.username} -> {self.email}"
 
 
+class WorkOSSession(models.Model):
+    session_id = models.CharField(max_length=255, primary_key=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name="workos_sessions",
+        on_delete=models.CASCADE,
+    )
+    workos_user_id = models.CharField(max_length=100)
+    workos_organization_id = models.CharField(max_length=100, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "revoked_at"]),
+            models.Index(fields=["workos_user_id"]),
+            models.Index(fields=["expires_at"]),
+        ]
+
+    @property
+    def is_revoked(self):
+        return self.revoked_at is not None
+
+    @property
+    def is_expired(self):
+        return self.expires_at <= timezone.now()
+
+    def __str__(self):
+        return f"{self.session_id} ({self.user_id})"
+
+
 def normalize_lookup_username(username):
     return (username or "").strip().lower()
 

@@ -1,17 +1,26 @@
 import logging
 import json
 import re
+from dataclasses import dataclass
+from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
 from django.db import transaction
 from django.db.models import Q
-from rest_framework_simplejwt.tokens import RefreshToken
+from django.utils import timezone
+import jwt
+from workos.session import (
+    AuthenticateWithSessionCookieSuccessResponse,
+    RefreshWithSessionCookieSuccessResponse,
+    seal_session_from_auth_response,
+)
 
 from authentication.models import (
     AuthAuditLog,
     SignupRequest,
+    WorkOSSession,
     UsernameEmailLookup,
     normalize_lookup_email,
     normalize_lookup_username,
@@ -54,6 +63,18 @@ class WorkOSPendingAuthentication(Exception):
 
 class MetroAccessDenied(Exception):
     pass
+
+
+class WorkOSSessionInvalid(WorkOSAuthenticationFailed):
+    pass
+
+
+@dataclass(frozen=True)
+class WorkOSSessionResult:
+    user: User
+    session: WorkOSSession
+    workos_session: object
+    sealed_session: str | None = None
 
 
 def get_workos_client():
@@ -244,12 +265,219 @@ def emit_workos_audit_event(audit_log):
     )
 
 
-def issue_metro_tokens(user):
-    refresh = RefreshToken.for_user(user)
+def _require_workos_cookie_password():
+    if not settings.WORKOS_COOKIE_PASSWORD:
+        raise WorkOSConfigurationError("WORKOS_COOKIE_PASSWORD is required.")
+    return settings.WORKOS_COOKIE_PASSWORD
+
+
+def _auth_response_value(auth_response, key, default=None):
+    data = as_plain_data(auth_response)
+    return data.get(key) if isinstance(data, dict) else default
+
+
+def session_id_from_access_token(access_token):
+    try:
+        decoded = jwt.decode(
+            access_token,
+            options={"verify_signature": False, "verify_aud": False},
+        )
+    except Exception:
+        return None
+    session_id = decoded.get("sid")
+    return session_id if isinstance(session_id, str) else None
+
+
+def workos_session_id_from_auth_response(auth_response):
+    session_id = _auth_response_value(auth_response, "session_id")
+    if session_id:
+        return session_id
+    access_token = _auth_response_value(auth_response, "access_token")
+    return session_id_from_access_token(access_token) if access_token else None
+
+
+def seal_workos_auth_response(auth_response):
+    cookie_password = _require_workos_cookie_password()
+    auth_data = as_plain_data(auth_response)
+    access_token = auth_data.get("access_token")
+    refresh_token = auth_data.get("refresh_token")
+    workos_user = as_plain_data(auth_data.get("user"))
+
+    if not access_token or not refresh_token or not workos_user:
+        raise WorkOSAuthenticationFailed("WorkOS authentication response did not include session tokens.")
+
+    return seal_session_from_auth_response(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        user=workos_user,
+        impersonator=as_plain_data(auth_data.get("impersonator")) or None,
+        cookie_password=cookie_password,
+    )
+
+
+def issue_workos_session(user, auth_response):
+    auth_data = as_plain_data(auth_response)
+    workos_user = as_plain_data(auth_data.get("user"))
+    session_id = workos_session_id_from_auth_response(auth_response)
+    workos_user_id = _workos_user_id(workos_user)
+    workos_organization_id = auth_data.get("organization_id") or auth_data.get("organizationId") or ""
+
+    if not session_id:
+        raise WorkOSAuthenticationFailed("WorkOS authentication response did not include a session id.")
+    if not workos_user_id:
+        raise WorkOSAuthenticationFailed("WorkOS authentication response did not include a user id.")
+
+    sealed_session = seal_workos_auth_response(auth_response)
+    expires_at = timezone.now() + timedelta(seconds=settings.WORKOS_SESSION_MAX_AGE_SECONDS)
+
+    WorkOSSession.objects.update_or_create(
+        session_id=session_id,
+        defaults={
+            "user": user,
+            "workos_user_id": workos_user_id,
+            "workos_organization_id": workos_organization_id,
+            "expires_at": expires_at,
+            "revoked_at": None,
+            "last_seen_at": timezone.now(),
+        },
+    )
+
     return {
-        "access": str(refresh.access_token),
-        "refresh": str(refresh),
+        "sealed_session": sealed_session,
+        "session_id": session_id,
+        "session_expires_at": int(expires_at.timestamp()),
+        "session_max_age_seconds": settings.WORKOS_SESSION_MAX_AGE_SECONDS,
     }
+
+
+def _authenticate_workos_session_cookie(session_cookie):
+    client = get_workos_client()
+    return client.user_management.authenticate_with_session_cookie(
+        session_data=session_cookie or "",
+        cookie_password=_require_workos_cookie_password(),
+    )
+
+
+def _refresh_workos_session_cookie(session_cookie):
+    client = get_workos_client()
+    session = client.user_management.load_sealed_session(
+        session_data=session_cookie,
+        cookie_password=_require_workos_cookie_password(),
+    )
+    return session.refresh()
+
+
+def revoke_workos_session_id(session_id):
+    if not session_id:
+        return False
+    try:
+        get_workos_client().user_management.revoke_session(session_id=session_id)
+    except Exception:
+        logger.warning("WorkOS session revocation failed for %s", session_id, exc_info=True)
+        return False
+    return True
+
+
+def mark_workos_session_revoked(session_id):
+    if not session_id:
+        return False
+    now = timezone.now()
+    updated = WorkOSSession.objects.filter(session_id=session_id, revoked_at__isnull=True).update(revoked_at=now)
+    return updated > 0
+
+
+def revoke_workos_session_cookie(session_cookie):
+    if not session_cookie:
+        return None
+
+    session_id = None
+    try:
+        auth_result = _authenticate_workos_session_cookie(session_cookie)
+        if isinstance(auth_result, AuthenticateWithSessionCookieSuccessResponse) and auth_result.authenticated:
+            session_id = auth_result.session_id
+    except Exception:
+        pass
+
+    if not session_id:
+        try:
+            refresh_result = _refresh_workos_session_cookie(session_cookie)
+            if isinstance(refresh_result, RefreshWithSessionCookieSuccessResponse) and refresh_result.authenticated:
+                session_id = refresh_result.session_id
+        except Exception:
+            session_id = None
+
+    if session_id:
+        mark_workos_session_revoked(session_id)
+        revoke_workos_session_id(session_id)
+    return session_id
+
+
+def _workos_session_user_id(workos_session):
+    return _workos_user_id(as_plain_data(getattr(workos_session, "user", None)))
+
+
+def _validate_workos_session(workos_session, *, sealed_session=None):
+    session_id = getattr(workos_session, "session_id", "")
+    workos_user_id = _workos_session_user_id(workos_session)
+    if not session_id or not workos_user_id:
+        raise WorkOSSessionInvalid("Authentication session is invalid.")
+
+    session = (
+        WorkOSSession.objects.select_related("user")
+        .filter(session_id=session_id)
+        .first()
+    )
+    if not session:
+        revoke_workos_session_id(session_id)
+        raise WorkOSSessionInvalid("Authentication session is not recognized.")
+    if session.workos_user_id != workos_user_id:
+        mark_workos_session_revoked(session_id)
+        revoke_workos_session_id(session_id)
+        raise WorkOSSessionInvalid("Authentication session user changed.")
+    if session.revoked_at:
+        raise WorkOSSessionInvalid("Authentication session has been revoked.")
+    if session.expires_at <= timezone.now():
+        mark_workos_session_revoked(session_id)
+        revoke_workos_session_id(session_id)
+        raise WorkOSSessionInvalid("Authentication session has expired.")
+    if not session.user.is_active:
+        mark_workos_session_revoked(session_id)
+        revoke_workos_session_id(session_id)
+        raise WorkOSSessionInvalid("User is inactive.")
+
+    session.last_seen_at = timezone.now()
+    session.save(update_fields=["last_seen_at"])
+    return WorkOSSessionResult(
+        user=session.user,
+        session=session,
+        workos_session=workos_session,
+        sealed_session=sealed_session,
+    )
+
+
+def authenticate_workos_session_cookie(session_cookie):
+    if not session_cookie:
+        raise WorkOSSessionInvalid("Authentication session cookie is missing.")
+
+    try:
+        auth_result = _authenticate_workos_session_cookie(session_cookie)
+    except Exception as exc:
+        logger.info("WorkOS sealed session authentication failed.", exc_info=True)
+        auth_result = None
+
+    if isinstance(auth_result, AuthenticateWithSessionCookieSuccessResponse) and auth_result.authenticated:
+        return _validate_workos_session(auth_result)
+
+    try:
+        refresh_result = _refresh_workos_session_cookie(session_cookie)
+    except Exception as exc:
+        logger.info("WorkOS sealed session refresh failed.", exc_info=True)
+        raise WorkOSSessionInvalid("Authentication session is invalid.") from exc
+
+    if isinstance(refresh_result, RefreshWithSessionCookieSuccessResponse) and refresh_result.authenticated:
+        return _validate_workos_session(refresh_result, sealed_session=refresh_result.sealed_session)
+
+    raise WorkOSSessionInvalid("Authentication session is invalid.")
 
 
 def extract_error_payload(exc):

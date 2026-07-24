@@ -1,4 +1,5 @@
 from django.core.cache import caches
+from django.conf import settings
 from rest_framework import status, generics, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -6,9 +7,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import AnonRateThrottle
 from django.contrib.auth import get_user_model
 from django.contrib.auth.signals import user_logged_in
-from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from rest_framework_simplejwt.tokens import RefreshToken
 from .serializers import (
     ChangePasswordSerializer,
     ClientSuperAdminCreateSerializer,
@@ -50,12 +49,13 @@ from .workos_service import (
     challenge_mfa_factor,
     create_magic_auth,
     create_client_super_admin_account,
-    issue_metro_tokens,
+    issue_workos_session,
     record_auth_event,
     record_verified_username_lookup,
     request_ip,
     request_user_agent,
     resolve_identifier_email,
+    revoke_workos_session_cookie,
     scrub_metadata,
     sync_current_user_from_workos,
     sync_workos_authentication,
@@ -159,7 +159,24 @@ def _complete_workos_auth(request, auth_response, event_type):
         return Response({"detail": GENERIC_AUTH_ERROR}, status=status.HTTP_403_FORBIDDEN)
 
     user = _user_with_relations(user)
-    user_logged_in.send(sender=user.__class__, request=request, user=user)
+    try:
+        session = issue_workos_session(user, auth_response)
+    except WorkOSConfigurationError:
+        return _workos_config_response()
+    except WorkOSAuthenticationFailed:
+        record_auth_event(
+            event_type,
+            "FAILURE",
+            request,
+            actor=user,
+            target_user=user,
+            company=company,
+            workos_user_id=workos_user_id,
+            workos_organization_id=workos_organization_id,
+            metadata={"reason": "workos_session_issue_failed"},
+        )
+        return Response({"detail": GENERIC_AUTH_ERROR}, status=status.HTTP_502_BAD_GATEWAY)
+
     record_auth_event(
         event_type,
         "SUCCESS",
@@ -171,11 +188,14 @@ def _complete_workos_auth(request, auth_response, event_type):
         workos_organization_id=workos_organization_id,
         metadata={"ip_address": request_ip(request), "user_agent": request_user_agent(request)},
     )
-    tokens = issue_metro_tokens(user)
-    return Response({
-        **tokens,
+    user_logged_in.send(sender=user.__class__, request=request, user=user)
+    response = Response({
         "user": UserSerializer(user).data,
+        "session_expires_at": session["session_expires_at"],
+        "session_max_age_seconds": session["session_max_age_seconds"],
     })
+    response[settings.WORKOS_REFRESHED_SESSION_HEADER] = session["sealed_session"]
+    return response
 
 
 class LoginView(generics.GenericAPIView):
@@ -580,13 +600,14 @@ class LogoutView(generics.GenericAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        revoked = True
-        try:
-            RefreshToken(serializer.validated_data["refresh"]).blacklist()
-        except TokenError:
-            revoked = False
+        session_cookie = (
+            request.headers.get(settings.WORKOS_SESSION_HEADER)
+            or request.COOKIES.get(settings.WORKOS_SESSION_COOKIE_NAME)
+            or serializer.validated_data.get("session")
+        )
+        session_id = revoke_workos_session_cookie(session_cookie)
 
-        return Response({"ok": True, "revoked": revoked})
+        return Response({"ok": True, "revoked": bool(session_id)})
 
 
 class ChangePasswordView(generics.GenericAPIView):

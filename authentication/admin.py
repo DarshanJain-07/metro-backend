@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from authentication.models import AuthAuditLog, SignupRequest, UsernameEmailLookup
+from authentication.models import AuthAuditLog, SignupRequest, WorkOSSession, UsernameEmailLookup
 
 
 @admin.register(SignupRequest)
@@ -47,3 +47,20 @@ class AuthAuditLogAdmin(admin.ModelAdmin):
 class UsernameEmailLookupAdmin(admin.ModelAdmin):
     list_display = ("username", "email")
     search_fields = ("username", "email")
+
+
+@admin.register(WorkOSSession)
+class WorkOSSessionAdmin(admin.ModelAdmin):
+    list_display = ("session_id", "user", "workos_user_id", "expires_at", "revoked_at", "last_seen_at")
+    list_filter = ("revoked_at", "expires_at", "created_at")
+    search_fields = ("session_id", "workos_user_id", "user__username", "user__email")
+    readonly_fields = (
+        "session_id",
+        "user",
+        "workos_user_id",
+        "workos_organization_id",
+        "created_at",
+        "expires_at",
+        "revoked_at",
+        "last_seen_at",
+    )

@@ -1,6 +1,5 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
-from rest_framework_simplejwt.views import TokenRefreshView, TokenVerifyView
 
 from .views import (
     AuthSyncView,
@@ -67,8 +66,6 @@ urlpatterns = [
     path("logout/", LogoutView.as_view(), name="auth_logout"),
     path("sync/", AuthSyncView.as_view(), name="auth_sync"),
     path("me/", MeView.as_view(), name="me"),
-    path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
-    path("token/verify/", TokenVerifyView.as_view(), name="token_verify"),
     path("change-password/", ChangePasswordView.as_view(), name="change_password"),
     path("", include(router.urls)),
 ]

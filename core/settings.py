@@ -39,6 +39,19 @@ def require_bool(name):
     return value in ('1', 'true', 'yes', 'on')
 
 
+def optional_int(name, default):
+    value = os.environ.get(name)
+    if value in (None, ''):
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ImportError(f"The {name} environment variable must be an integer.") from exc
+    if parsed <= 0:
+        raise ImportError(f"The {name} environment variable must be positive.")
+    return parsed
+
+
 def get_url_host(url):
     parsed = urlparse(url)
     return parsed.hostname
@@ -135,7 +148,7 @@ AUTH_USER_MODEL = 'core.User'
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'core.authentication.ActiveContextJWTAuthentication',
+        'core.authentication.ActiveContextWorkOSSessionAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
@@ -168,6 +181,16 @@ SIMPLE_JWT = {
 
 WORKOS_API_KEY = require_env('WORKOS_API_KEY')
 WORKOS_CLIENT_ID = require_env('WORKOS_CLIENT_ID')
+WORKOS_COOKIE_PASSWORD = os.environ.get('WORKOS_COOKIE_PASSWORD', '')
+if not WORKOS_COOKIE_PASSWORD and ('pytest' in sys.modules or 'test' in sys.argv):
+    WORKOS_COOKIE_PASSWORD = 'ujZ0FMxCIy65EaJGLwCZyHx74jwi3sL4Q44edvZg-nw='
+WORKOS_SESSION_COOKIE_NAME = os.environ.get('WORKOS_SESSION_COOKIE_NAME', 'metro_workos_session')
+WORKOS_SESSION_HEADER = 'X-Metro-WorkOS-Session'
+WORKOS_REFRESHED_SESSION_HEADER = 'X-Metro-WorkOS-Refreshed-Session'
+WORKOS_SESSION_MAX_AGE_SECONDS = optional_int(
+    'WORKOS_SESSION_MAX_AGE_SECONDS',
+    int(SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'].total_seconds()),
+)
 WORKOS_AUTO_PROVISION_USERS = False
 WORKOS_AUDIT_LOGS_ENABLED = os.environ.get('WORKOS_AUDIT_LOGS_ENABLED', 'false').lower() in ('1', 'true', 'yes', 'on')
 WORKOS_ROLE_SLUGS = {
@@ -223,6 +246,7 @@ MIDDLEWARE = [
     'core.middleware.TenantMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'core.middleware.WorkOSSessionRefreshMiddleware',
     'core.middleware.RequestMethodMiddleware',
 ]
 

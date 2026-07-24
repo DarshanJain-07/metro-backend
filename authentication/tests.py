@@ -3,15 +3,14 @@ from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from django.conf import settings
 from django.core.management import call_command
 from django.core import mail
 from django.test import override_settings, SimpleTestCase, TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
-from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
-from rest_framework_simplejwt.tokens import RefreshToken
-from authentication.models import AuthAuditLog, SignupRequest, UsernameEmailLookup
+from authentication.models import AuthAuditLog, SignupRequest, WorkOSSession, UsernameEmailLookup
 from authentication.workos_service import (
     WorkOSConfigurationError,
     WorkOSPendingAuthentication,
@@ -117,6 +116,14 @@ class InvalidRoleWorkOSClient(FakeWorkOSClient):
     def __init__(self):
         super().__init__()
         self.organization_membership = InvalidRoleWorkOSOrganizationMembership()
+
+
+def fake_session_fields(session_id):
+    return {
+        "access_token": f"access_{session_id}",
+        "refresh_token": f"refresh_{session_id}",
+        "session_id": session_id,
+    }
 
 
 @override_settings(
@@ -720,6 +727,7 @@ class SignupRequestTests(TestCase):
                 "last_name": "User",
             },
             "organization_id": "org_signup_123",
+            **fake_session_fields("session_signup_123"),
         }
 
         response = self.client.post(
@@ -763,6 +771,7 @@ class SignupRequestTests(TestCase):
                 "last_name": "User",
             },
             "organization_id": "org_lookup_123",
+            **fake_session_fields("session_lookup_123"),
         }
         list_memberships.return_value = [{"id": "om_lookup_123", "status": "active", "role_slug": "super-admin"}]
 
@@ -799,6 +808,7 @@ class SignupRequestTests(TestCase):
                 "last_name": "User",
             },
             "organization_id": "org_local_username_123",
+            **fake_session_fields("session_local_username_123"),
         }
         list_memberships.return_value = [{"id": "om_local_username_123", "status": "active", "role_slug": "super-admin"}]
 
@@ -834,6 +844,7 @@ class SignupRequestTests(TestCase):
                 "last_name": "User",
             },
             "organization_id": "org_signup_123",
+            **fake_session_fields("session_email_verify_123"),
         }
         mock_verify_email.return_value = auth_response
         mock_sync.return_value = (user, company)
@@ -848,7 +859,8 @@ class SignupRequestTests(TestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn("access", response.data)
+        self.assertTrue(response.headers.get(settings.WORKOS_REFRESHED_SESSION_HEADER))
+        self.assertTrue(WorkOSSession.objects.filter(session_id="session_email_verify_123", user=user).exists())
         mock_verify_email.assert_called_once()
 
 class UserPermissionsTestCase(TestCase):
@@ -1211,7 +1223,7 @@ class WorkOSAuthIntegrationTestCase(TestCase):
             role=Role.VIEWER,
         )
 
-    def workos_auth_response(self, user_id="user_123", email="worker@example.com"):
+    def workos_auth_response(self, user_id="user_123", email="worker@example.com", session_id="session_123"):
         return {
             "user": {
                 "id": user_id,
@@ -1220,6 +1232,7 @@ class WorkOSAuthIntegrationTestCase(TestCase):
                 "last_name": "User",
             },
             "organization_id": "org_123",
+            **fake_session_fields(session_id),
         }
 
     def workos_membership(self, role_slug="viewer", status_value="active"):
@@ -1231,7 +1244,7 @@ class WorkOSAuthIntegrationTestCase(TestCase):
 
     @patch("authentication.workos_service.list_workos_memberships")
     @patch("authentication.views.authenticate_with_password")
-    def test_password_login_syncs_workos_user_and_issues_metro_tokens(self, authenticate_with_password, list_memberships):
+    def test_password_login_syncs_workos_user_and_issues_workos_session(self, authenticate_with_password, list_memberships):
         authenticate_with_password.return_value = self.workos_auth_response()
         list_memberships.return_value = [self.workos_membership()]
 
@@ -1242,8 +1255,12 @@ class WorkOSAuthIntegrationTestCase(TestCase):
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn("access", response.data)
-        self.assertIn("refresh", response.data)
+        self.assertNotIn("access", response.data)
+        self.assertNotIn("refresh", response.data)
+        self.assertTrue(response.headers.get(settings.WORKOS_REFRESHED_SESSION_HEADER))
+        self.assertTrue(
+            WorkOSSession.objects.filter(session_id="session_123", user=self.user, revoked_at__isnull=True).exists()
+        )
         self.user.refresh_from_db()
         self.assertEqual(self.user.workos_user_id, "user_123")
         self.assertFalse(self.user.has_usable_password())
@@ -1318,32 +1335,22 @@ class WorkOSAuthIntegrationTestCase(TestCase):
 
         self.assertEqual(response.status_code, status.HTTP_410_GONE)
 
-    def test_logout_blacklists_refresh_token(self):
-        refresh = RefreshToken.for_user(self.user)
-
+    @patch("authentication.views.revoke_workos_session_cookie")
+    def test_logout_revokes_workos_session_cookie(self, revoke_session_cookie):
+        revoke_session_cookie.return_value = "session_123"
         response = self.client.post(
             reverse("auth_logout"),
-            {"refresh": str(refresh)},
             format="json",
+            HTTP_X_METRO_WORKOS_SESSION="sealed_session",
         )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data["revoked"])
-        self.assertTrue(
-            BlacklistedToken.objects.filter(token__jti=refresh["jti"]).exists()
-        )
+        revoke_session_cookie.assert_called_once_with("sealed_session")
 
-        refresh_response = self.client.post(
-            reverse("token_refresh"),
-            {"refresh": str(refresh)},
-            format="json",
-        )
-        self.assertEqual(refresh_response.status_code, status.HTTP_401_UNAUTHORIZED)
-
-    def test_logout_is_idempotent_for_invalid_refresh_token(self):
+    def test_logout_is_idempotent_without_session_cookie(self):
         response = self.client.post(
             reverse("auth_logout"),
-            {"refresh": "not-a-refresh-token"},
             format="json",
         )
 

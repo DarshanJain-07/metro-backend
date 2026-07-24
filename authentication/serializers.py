@@ -102,7 +102,7 @@ class OrganizationSelectionSerializer(serializers.Serializer):
 
 
 class LogoutSerializer(serializers.Serializer):
-    refresh = serializers.CharField(write_only=True)
+    session = serializers.CharField(required=False, allow_blank=True, write_only=True)
 
 
 class SignupRequestCreateSerializer(serializers.ModelSerializer):

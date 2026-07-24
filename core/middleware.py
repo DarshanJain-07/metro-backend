@@ -1,6 +1,7 @@
 import logging
 import uuid
 
+from django.conf import settings
 from django.http import JsonResponse
 
 from core.request_context import (
@@ -89,6 +90,18 @@ class RequestMethodMiddleware:
         finally:
             reset_request_method(token_method)
             reset_primary_requested(token_primary)
+
+
+class WorkOSSessionRefreshMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        refreshed_session = getattr(request, "workos_refreshed_session", None)
+        if refreshed_session:
+            response[settings.WORKOS_REFRESHED_SESSION_HEADER] = refreshed_session
+        return response
 
 
 class TenantMiddleware:

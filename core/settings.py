@@ -92,7 +92,6 @@ DEBUG = require_bool('DJANGO_DEBUG')
 
 FRONTEND_URL = require_env('FRONTEND_URL').rstrip('/')
 BACKEND_URL = require_env('BACKEND_URL').rstrip('/')
-REDIS_URL = require_env('REDIS_URL')
 
 BACKEND_HOST = get_url_host(BACKEND_URL)
 if not BACKEND_HOST:
@@ -101,19 +100,6 @@ if not BACKEND_HOST:
 ALLOWED_HOSTS = [BACKEND_HOST]
 if DEBUG:
     ALLOWED_HOSTS = unique(ALLOWED_HOSTS + ['localhost', '127.0.0.1', '::1'])
-
-
-# Application definition
-
-# Celery Configuration
-CELERY_BROKER_URL = REDIS_URL
-CELERY_RESULT_BACKEND = REDIS_URL
-CELERY_ACCEPT_CONTENT = ['json']
-CELERY_TASK_SERIALIZER = 'json'
-CELERY_RESULT_SERIALIZER = 'json'
-
-if 'pytest' in sys.modules or 'test' in sys.argv:
-    CELERY_TASK_ALWAYS_EAGER = True
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -310,20 +296,12 @@ if 'pytest' in sys.modules or 'test' in sys.argv:
 
 CACHES = {
     'default': {
-        'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': REDIS_URL,
-        'OPTIONS': {
-            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-            'IGNORE_EXCEPTIONS': True,
-        },
+        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': 'metro_cache_default',
     },
     'throttle': {
-        'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': REDIS_URL,
-        'OPTIONS': {
-            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-            'IGNORE_EXCEPTIONS': True,
-        },
+        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': 'metro_cache_throttle',
     },
 }
 

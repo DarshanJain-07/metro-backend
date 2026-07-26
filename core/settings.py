@@ -97,7 +97,13 @@ BACKEND_HOST = get_url_host(BACKEND_URL)
 if not BACKEND_HOST:
     raise ImportError("BACKEND_URL must be an absolute URL with a hostname.")
 
-ALLOWED_HOSTS = [BACKEND_HOST]
+INTERNAL_BACKEND_HOSTS = [
+    host.strip()
+    for host in os.environ.get('INTERNAL_BACKEND_HOSTS', 'backend').split(',')
+    if host.strip()
+]
+
+ALLOWED_HOSTS = unique([BACKEND_HOST] + INTERNAL_BACKEND_HOSTS)
 if DEBUG:
     ALLOWED_HOSTS = unique(ALLOWED_HOSTS + ['localhost', '127.0.0.1', '::1'])
 
